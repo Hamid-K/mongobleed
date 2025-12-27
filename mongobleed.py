@@ -26,7 +26,7 @@ from urllib.parse import unquote_to_bytes
 FIELD_NAME_RE = re.compile(rb"field name '([^']*)'")
 TYPE_RE = re.compile(rb"type (\d+)")
 URL_ENC_RE = re.compile(r"%[0-9A-Fa-f]{2}")
-UNICODE_ESC_RE = re.compile(r"\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}")
+UNICODE_ESC_RE = re.compile(r"\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[nrt\"\\\\]")
 BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 
 def send_probe(host, port, doc_len, buffer_size, timeout):
@@ -139,6 +139,28 @@ def main():
         printable = sum(1 for ch in text if ch.isprintable())
         return (printable / len(text)) >= 0.7
 
+    def render_clean_text(text):
+        out = []
+        for ch in text:
+            code = ord(ch)
+            if ch == "\\":
+                out.append(r"\\")
+            elif ch == "\n":
+                out.append(r"\n")
+            elif ch == "\r":
+                out.append(r"\r")
+            elif ch == "\t":
+                out.append(r"\t")
+            elif 32 <= code <= 126:
+                out.append(ch)
+            elif ch.isprintable():
+                out.append(ch)
+            elif code <= 0xFF:
+                out.append(f"\\x{code:02x}")
+            else:
+                out.append(f"\\u{code:04x}")
+        return "".join(out)
+
     def decode_variants(data, limit):
         variants = []
         ascii_text = data.decode("ascii", errors="ignore")
@@ -155,8 +177,9 @@ def main():
         if UNICODE_ESC_RE.search(ascii_text):
             try:
                 decoded_text = codecs.decode(ascii_text, "unicode_escape")
-                if is_mostly_printable(decoded_text):
-                    variants.append("unicode:" + truncate_text(decoded_text, limit))
+                cleaned = render_clean_text(decoded_text)
+                if is_mostly_printable(cleaned):
+                    variants.append("esc:" + truncate_text(cleaned, limit))
             except Exception:
                 pass
 

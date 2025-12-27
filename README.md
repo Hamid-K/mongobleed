@@ -88,6 +88,7 @@ Compared to the original release, this fork adds:
 - Unique-only output writing with append support across runs
 - ASCII-safe previews to avoid mangled console output
 - Optional decoding of URL/unicode/base64 previews (`--decode`)
+- Escaped character cleanup for decoded previews (`\\uXXXX`, `\\xNN`, `\\n`, etc.)
 - Rich-formatted console logging
 - Additional tunables (`--buffer-bump`, `--timeout`, `--preview-bytes`)
 
