@@ -42,6 +42,9 @@ python3 mongobleed.py --host <target> --auto
 # Loop until stopped (Ctrl+C)
 python3 mongobleed.py --host <target> --loop
 
+# Optimized scanning strategy (sampling + hot offsets)
+python3 mongobleed.py --host <target> --optimize --loop --decode
+
 # Deep scan for more data
 python3 mongobleed.py --host <target> --max-offset 50000
 
@@ -76,6 +79,7 @@ python3 mongobleed.py --host <target> --decode
 | `--auto-samples` | 8 | Samples per config in auto sweep |
 | `--auto-mode` | speed | Optimize for `speed` (bytes/sec) or `size` (max bytes) |
 | `--auto-timeout-max` | 300 | Max per-probe timeout in auto mode (seconds) |
+| `--optimize` | false | Smarter scan strategy with sampling, hot offsets, and backoff |
 | `--output` | auto | Output file for leaked data |
 
 ## Defaults
@@ -122,6 +126,7 @@ When you run with just `--loop --decode`, these defaults apply:
 - `--auto-legacy` uses a legacy scan to bias auto toward hot offsets.
 - In `--auto` mode, the window auto-expands after several empty passes to keep finding new leaks.
 - Use `--auto-mode size` if you want maximum leak size instead of speed.
+- `--optimize` reuses connections per worker and rotates between sampling and dense scans.
 - The effective cap is the server’s `maxMessageSizeBytes`; values above it will be rejected before parsing.
 
 ## Improvements
@@ -136,6 +141,7 @@ Compared to the original release, this fork adds:
 - Optional decoding of URL/unicode/base64 previews (`--decode`)
 - Escaped character cleanup for decoded previews (`\\uXXXX`, `\\xNN`, `\\n`, etc.)
 - Automatic dump size/window tuning (`--auto`)
+- Optimized scanning mode with sampling + hot offsets (`--optimize`)
 - Rich-formatted console logging
 - Additional tunables (`--buffer-bump`, `--timeout`, `--preview-bytes`)
 

