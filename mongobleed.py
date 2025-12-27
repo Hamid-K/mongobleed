@@ -595,7 +595,12 @@ def main():
     finally:
         out_fh.close()
     console.print("")
-    console.print(f"[bold cyan][*][/bold cyan] Total leaked: {len(all_leaked)} bytes")
+    total_bytes = len(all_leaked)
+    if total_bytes >= 1024:
+        total_kb = total_bytes / 1024
+        console.print(f"[bold cyan][*][/bold cyan] Total leaked: {total_bytes} bytes ({total_kb:.1f} KB)")
+    else:
+        console.print(f"[bold cyan][*][/bold cyan] Total leaked: {total_bytes} bytes")
     console.print(f"[bold cyan][*][/bold cyan] Unique fragments (this run): {len(unique_leaks)}")
     console.print(f"[bold cyan][*][/bold cyan] Saved to: {args.output}")
     if interrupted:
