@@ -172,7 +172,7 @@ def main():
     parser.add_argument('--buffer-extra', type=int, default=500, help='Extra bytes for claimed buffer size')
     parser.add_argument('--timeout', type=float, default=2.0, help='Socket timeout in seconds')
     parser.add_argument('--workers', type=int, default=max(4, (os.cpu_count() or 4) * 10), help='Thread count')
-    parser.add_argument('--preview-bytes', type=int, default=80, help='Bytes to show in console preview')
+    parser.add_argument('--preview-bytes', default='80', help='Bytes to show in console preview (e.g., 4096, 4KB)')
     parser.add_argument('--max-empty-passes', type=int, default=1, help='Stop after N passes with no new leaks')
     parser.add_argument('--loop', action='store_true', help='Keep looping until stopped')
     parser.add_argument('--decode', action='store_true', help='Try to decode URL, unicode escapes, and base64')
@@ -181,7 +181,7 @@ def main():
     parser.add_argument('--auto', action='store_true', help='Auto-tune dump size/window for best yield')
     parser.add_argument('--auto-legacy', action='store_true',
                         help='Seed auto-tune with a legacy scan to find hot offsets')
-    parser.add_argument('--auto-min', default='64KB', help='Min size for auto sweep (e.g., 64KB)')
+    parser.add_argument('--auto-min', default='20', help='Min size for auto sweep (e.g., 64KB)')
     parser.add_argument('--auto-max', default='10MB', help='Max size for auto sweep (e.g., 10MB)')
     parser.add_argument('--auto-samples', type=int, default=8, help='Samples per config in auto sweep')
     parser.add_argument('--auto-timeout-max', type=float, default=300.0,
@@ -435,6 +435,13 @@ def main():
                     per_offset_bytes[off] = offset_bytes
         return leaks_found, leak_bytes, empty_count, per_offset_bytes
 
+    try:
+        args.preview_bytes = parse_size(args.preview_bytes)
+    except ValueError as exc:
+        console.print(f"[bold red][!][/bold red] {exc}")
+        return
+
+    auto_context = None
     if args.auto:
         try:
             min_size = parse_size(args.auto_min)
@@ -475,6 +482,20 @@ def main():
             f"{len(legacy_leaks)} fragments, {legacy_bytes} bytes"
         )
 
+        legacy_score = None
+        legacy_window = 0
+        legacy_offsets_dense = list(range(20, 8192))
+        t0 = time.perf_counter()
+        legacy_leaks_dense, legacy_bytes_dense, _ = run_probe_offsets(
+            legacy_offsets_dense, args.buffer_extra
+        )
+        elapsed = max(0.001, time.perf_counter() - t0)
+        legacy_score = legacy_bytes_dense / elapsed
+        console.print(
+            f"[bold cyan][*][/bold cyan] legacy-range leaks={len(legacy_leaks_dense)} "
+            f"bytes={legacy_bytes_dense} score={legacy_score:.1f}"
+        )
+
         if args.auto_legacy and per_offset_bytes:
             best_offset = max(per_offset_bytes.items(), key=lambda x: x[1])[0]
             best_offset = max(min_size, min(best_offset, max_size))
@@ -499,6 +520,16 @@ def main():
                 sizes.append(max_size)
 
         best = None
+        if legacy_score is not None and legacy_bytes_dense > 0:
+            best = {
+                "size": 8192,
+                "window": legacy_window,
+                "buffer_extra": args.buffer_extra,
+                "score": legacy_score,
+                "key": legacy_score if args.auto_mode == 'speed' else legacy_bytes_dense,
+                "leak_bytes": legacy_bytes_dense,
+                "leaks": len(legacy_leaks_dense),
+            }
         console.print("[bold cyan][*][/bold cyan] Auto-tuning dump size/window...")
         try:
             for size in sizes:
@@ -567,6 +598,15 @@ def main():
             f"--min-offset {args.min_offset} --max-offset {args.max_offset} "
             f"--buffer-extra {args.buffer_extra} --timeout {args.timeout:.1f}"
         )
+        max_window = max(0, min(max_size - target, target - min_size))
+        auto_context = {
+            "min_size": min_size,
+            "max_size": max_size,
+            "center": target,
+            "window": window,
+            "max_window": max_window,
+            "empty_streak": 0,
+        }
 
     if args.dump and not args.auto:
         target = parse_size(args.dump)
@@ -646,6 +686,31 @@ def main():
                                             preview = cleaned
                                 console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
             if args.loop:
+                if auto_context is not None:
+                    if new_in_pass == 0:
+                        auto_context["empty_streak"] += 1
+                    else:
+                        auto_context["empty_streak"] = 0
+                    if auto_context["empty_streak"] >= 5:
+                        current = auto_context["window"]
+                        next_window = max(current * 2, current + 1024)
+                        next_window = min(auto_context["max_window"], next_window)
+                        if next_window > current:
+                            auto_context["window"] = next_window
+                            auto_context["empty_streak"] = 0
+                            args.min_offset = max(
+                                auto_context["min_size"],
+                                auto_context["center"] - next_window,
+                            )
+                            args.max_offset = min(
+                                auto_context["max_size"],
+                                auto_context["center"] + next_window,
+                            ) + 1
+                            console.print(
+                                "[bold yellow][!][/bold yellow] "
+                                f"Auto-expand window to +/- {next_window} "
+                                f"(range {args.min_offset}-{args.max_offset})"
+                            )
                 console.print(f"[bold cyan][*][/bold cyan] Pass {pass_num} complete, new fragments: {new_in_pass}")
                 continue
 

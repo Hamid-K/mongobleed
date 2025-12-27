@@ -71,7 +71,7 @@ python3 mongobleed.py --host <target> --decode
 | `--dump-window` | 0 | Probe +/- N bytes around dump size (0=auto) |
 | `--auto` | false | Auto-tune dump size/window for best yield |
 | `--auto-legacy` | false | Seed auto-tune with a legacy scan to find hot offsets |
-| `--auto-min` | 64KB | Min size for auto sweep |
+| `--auto-min` | 20 | Min size for auto sweep |
 | `--auto-max` | 10MB | Max size for auto sweep |
 | `--auto-samples` | 8 | Samples per config in auto sweep |
 | `--auto-mode` | speed | Optimize for `speed` (bytes/sec) or `size` (max bytes) |
@@ -120,6 +120,7 @@ When you run with just `--loop --decode`, these defaults apply:
 - `--dump` uses an automatic window when `--dump-window 0`; override it for tighter or wider scans.
 - `--auto` ignores manual `--dump`/offset ranges and picks a size/window based on quick probes.
 - `--auto-legacy` uses a legacy scan to bias auto toward hot offsets.
+- In `--auto` mode, the window auto-expands after several empty passes to keep finding new leaks.
 - Use `--auto-mode size` if you want maximum leak size instead of speed.
 - The effective cap is the server’s `maxMessageSizeBytes`; values above it will be rejected before parsing.
 
