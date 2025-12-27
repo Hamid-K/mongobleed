@@ -78,6 +78,19 @@ python3 mongobleed.py --host <target> --decode
 [*] Saved to: leaked_localhost_27017_20250101_120000.bin
 ```
 
+## Improvements
+
+Compared to the original release, this fork adds:
+
+- Multi-threaded scanning with configurable worker count
+- Continuous scanning modes (`--loop` and `--max-empty-passes`)
+- Automatic, timestamped output naming with host/port
+- Unique-only output writing with append support across runs
+- ASCII-safe previews to avoid mangled console output
+- Optional decoding of URL/unicode/base64 previews (`--decode`)
+- Rich-formatted console logging
+- Additional tunables (`--buffer-bump`, `--timeout`, `--preview-bytes`)
+
 ## Test Environment
 
 A Docker Compose file is included to spin up a vulnerable MongoDB instance:
