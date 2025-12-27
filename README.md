@@ -73,6 +73,8 @@ python3 mongobleed.py --host <target> --decode
 | `--auto-min` | 64KB | Min size for auto sweep |
 | `--auto-max` | 10MB | Max size for auto sweep |
 | `--auto-samples` | 8 | Samples per config in auto sweep |
+| `--auto-mode` | speed | Optimize for `speed` (bytes/sec) or `size` (max bytes) |
+| `--auto-timeout-max` | 300 | Max per-probe timeout in auto mode (seconds) |
 | `--output` | auto | Output file for leaked data |
 
 ## Example Output
@@ -100,6 +102,7 @@ python3 mongobleed.py --host <target> --decode
 - Use `--dump` for a single probe at an exact claimed size (e.g., `--dump 10MB`).
 - `--dump` uses an automatic window when `--dump-window 0`; override it for tighter or wider scans.
 - `--auto` ignores manual `--dump`/offset ranges and picks a size/window based on quick probes.
+- Use `--auto-mode size` if you want maximum leak size instead of speed.
 - The effective cap is the server’s `maxMessageSizeBytes`; values above it will be rejected before parsing.
 
 ## Improvements
