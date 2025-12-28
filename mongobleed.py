@@ -665,6 +665,7 @@ def main():
             Screen {
                 background: #0000aa;
                 color: #ffffff;
+                layout: vertical;
             }
             #status {
                 background: #555500;
@@ -678,6 +679,12 @@ def main():
                 text-style: bold;
                 height: 1;
             }
+            #preview {
+                background: #0000aa;
+                color: #ffffff;
+                height: 4;
+                border: solid #aaaaaa;
+            }
             #footer {
                 background: #555500;
                 color: #000000;
@@ -688,25 +695,34 @@ def main():
                 background: #0000aa;
                 color: #ffffff;
                 border: solid #aaaaaa;
+                height: 1fr;
+                width: 100%;
             }
             """
 
             base = reactive(base_offset)
             rows = reactive(args.tui_rows)
             rate = reactive(0.0)
+            bytes_per_row = reactive(16)
+            show_preview = reactive(True)
+            search_state = reactive("")
+            paused = reactive(False)
+            decode_enabled = reactive(args.decode)
 
             def __init__(self):
                 super().__init__()
                 self.row_bytes = {}
                 self.row_changes = {}
+                self.last_preview = ""
                 self.executor = concurrent.futures.ThreadPoolExecutor(
                     max_workers=max(1, min(args.workers, args.tui_rows))
                 )
 
             def compose(self) -> ComposeResult:
                 yield Static(id="status")
-                yield Static("↑/↓ move 16 bytes  PgUp/PgDn page  q quit", id="tip")
+                yield Static("↑/↓ move row  PgUp/PgDn page  n/p hit  v view  d decode  space pause  q quit", id="tip")
                 yield Static(id="dump")
+                yield Static(id="preview")
                 yield Static(id="footer")
 
             def on_mount(self) -> None:
@@ -721,12 +737,27 @@ def main():
                     self.refresh_view()
 
             def _apply_auto_rows(self) -> None:
-                usable = max(4, self.size.height - 3)
-                self.rows = usable
+                try:
+                    dump = self.query_one("#dump")
+                    dump_h = dump.size.height
+                    dump_w = dump.size.width
+                except Exception:
+                    dump_h = max(4, self.size.height - 6)
+                    dump_w = max(60, self.size.width - 2)
+                self.rows = max(4, dump_h - 1)
+                # Offset(10) + spaces(2) + hex(3*n) + sep(3) + ascii(n) + end(1)
+                usable = max(8, dump_w - 16)
+                self.bytes_per_row = max(8, min(64, usable // 4))
 
             async def refresh_view(self) -> None:
                 t0 = time.time()
-                offsets = [self.base + i * 16 for i in range(self.rows)]
+                if args.tui_auto_size:
+                    self._apply_auto_rows()
+                if self.paused:
+                    self.search_state = "paused"
+                    self.query_one("#dump", Static).update(self._render_dump())
+                    return
+                offsets = [self.base + i * self.bytes_per_row for i in range(self.rows)]
                 loop = asyncio.get_running_loop()
                 tasks = [
                     loop.run_in_executor(
@@ -741,6 +772,7 @@ def main():
                     for off in offsets
                 ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
+                preview_candidates = []
                 for off, result in zip(offsets, results):
                     data = b""
                     ok = False
@@ -749,35 +781,96 @@ def main():
                     if ok:
                         leaks = extract_leaks(response)
                         if leaks:
-                            data = leaks[0]
-                    view = data[:16].ljust(16, b"\x00")
-                    prev = self.row_bytes.get(off, b"\x00" * 16)
-                    changes = self.row_changes.get(off, [0.0] * 16)
+                            data = max(leaks, key=len)
+                            preview_candidates.append(data)
+                    if not data:
+                        data = b""
                     now_ts = time.time()
-                    for i, b in enumerate(view):
-                        if i >= len(prev) or b != prev[i]:
-                            changes[i] = now_ts
-                    self.row_bytes[off] = view
-                    self.row_changes[off] = changes
+                    for idx in range(0, max(self.bytes_per_row, len(data)), self.bytes_per_row):
+                        chunk = data[idx:idx + self.bytes_per_row].ljust(self.bytes_per_row, b"\x00")
+                        row_off = off + idx
+                        prev = self.row_bytes.get(row_off, b"\x00" * self.bytes_per_row)
+                        changes = self.row_changes.get(row_off, [0.0] * self.bytes_per_row)
+                        for i, b in enumerate(chunk):
+                            if i >= len(prev) or b != prev[i]:
+                                changes[i] = now_ts
+                        self.row_bytes[row_off] = chunk
+                        self.row_changes[row_off] = changes
 
                 self.rate = 1.0 / max(args.tui_refresh, 0.001)
+                if preview_candidates:
+                    best = max(preview_candidates, key=len)
+                    preview = ascii_preview(best, min(1024, args.preview_bytes))
+                    if self.decode_enabled:
+                        variants = decode_variants(best, args.preview_bytes * 2)
+                        if variants:
+                            preview = " | ".join(variants)
+                        else:
+                            cleaned = decode_from_preview(preview, args.preview_bytes * 2)
+                            if cleaned:
+                                preview = cleaned
+                    self.last_preview = preview
                 status = (
                     f"base=0x{self.base:x} rows={self.rows} refresh={args.tui_refresh:.1f}s "
                     f"rate={self.rate:.1f}/s workers={args.workers} "
-                    f"decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}"
+                    f"decode={'on' if self.decode_enabled else 'off'} optimize={'on' if args.optimize else 'off'} "
+                    f"bytes/row={self.bytes_per_row} {self.search_state}"
                 )
                 self.query_one("#status", Static).update(status)
-                footer = "MC-TUI  |  q=quit  arrows=move  PgUp/PgDn=page"
+                footer = "MC-TUI  |  q=quit  arrows=move  PgUp/PgDn=page  n/p=hit  v=view  d=decode  space=pause"
                 self.query_one("#footer", Static).update(footer)
                 self.query_one("#dump", Static).update(self._render_dump())
+                if self.show_preview:
+                    self.query_one("#preview", Static).update(self.last_preview or "")
+                else:
+                    self.query_one("#preview", Static).update("")
+
+            async def _search_hit(self, direction):
+                self.search_state = f"search={'next' if direction > 0 else 'prev'}"
+                start = self.base + direction * self.bytes_per_row
+                step = self.bytes_per_row
+                max_span = max(step * self.rows * 4, 4096)
+                end = start + direction * max_span
+                offsets = list(range(start, end, direction * step))
+                loop = asyncio.get_running_loop()
+                for off in offsets:
+                    if off < 0:
+                        continue
+                    response, ok = await loop.run_in_executor(
+                        self.executor,
+                        send_probe_reuse,
+                        args.host,
+                        args.port,
+                        off,
+                        off + args.buffer_extra,
+                        args.timeout,
+                    )
+                    if ok:
+                        leaks = extract_leaks(response)
+                        if leaks:
+                            self.base = off
+                            best = max(leaks, key=len)
+                            preview = ascii_preview(best, min(1024, args.preview_bytes))
+                            if self.decode_enabled:
+                                variants = decode_variants(best, args.preview_bytes * 2)
+                                if variants:
+                                    preview = " | ".join(variants)
+                                else:
+                                    cleaned = decode_from_preview(preview, args.preview_bytes * 2)
+                                    if cleaned:
+                                        preview = cleaned
+                            self.last_preview = preview
+                            break
+                self.search_state = ""
+                await self.refresh_view()
 
             def _render_dump(self) -> Text:
                 out = Text()
                 now_ts = time.time()
                 for idx in range(self.rows):
-                    offset = self.base + idx * 16
-                    data = self.row_bytes.get(offset, b"\x00" * 16)
-                    changes = self.row_changes.get(offset, [0.0] * 16)
+                    offset = self.base + idx * self.bytes_per_row
+                    data = self.row_bytes.get(offset, b"\x00" * self.bytes_per_row)
+                    changes = self.row_changes.get(offset, [0.0] * self.bytes_per_row)
                     hex_text, ascii_text = _render_row_bytes(offset, data, changes, now_ts)
                     out.append(f"{offset:08x}  ", style="bold green on #0000aa")
                     out.append(hex_text)
@@ -789,14 +882,26 @@ def main():
             def on_key(self, event) -> None:
                 if event.key == "q":
                     self.exit()
+                elif event.key == "v":
+                    self.show_preview = not self.show_preview
+                elif event.key == "d":
+                    self.decode_enabled = not self.decode_enabled
+                elif event.key == "n":
+                    if not self.search_state:
+                        asyncio.create_task(self._search_hit(1))
+                elif event.key == "p":
+                    if not self.search_state:
+                        asyncio.create_task(self._search_hit(-1))
+                elif event.key == "space":
+                    self.paused = not self.paused
                 elif event.key == "up":
-                    self.base = max(0, self.base - 16)
+                    self.base = max(0, self.base - self.bytes_per_row)
                 elif event.key == "down":
-                    self.base += 16
+                    self.base += self.bytes_per_row
                 elif event.key == "pageup":
-                    self.base = max(0, self.base - self.rows * 16)
+                    self.base = max(0, self.base - self.rows * self.bytes_per_row)
                 elif event.key == "pagedown":
-                    self.base += self.rows * 16
+                    self.base += self.rows * self.bytes_per_row
 
         HexViewerApp().run()
         return
