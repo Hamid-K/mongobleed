@@ -80,6 +80,8 @@ python3 mongobleed.py --host <target> --decode
 | `--auto-mode` | speed | Optimize for `speed` (bytes/sec) or `size` (max bytes) |
 | `--auto-timeout-max` | 300 | Max per-probe timeout in auto mode (seconds) |
 | `--optimize` | false | Smarter scan strategy with sampling, hot offsets, and backoff |
+| `--hit` | none | Replay a specific hit token from output |
+| `--hit-wiggle` | 0 | Probe +/- N bytes around hit offset when replaying |
 | `--output` | auto | Output file for leaked data |
 
 ## Defaults
@@ -127,6 +129,8 @@ When you run with just `--loop --decode`, these defaults apply:
 - In `--auto` mode, the window auto-expands after several empty passes to keep finding new leaks.
 - Use `--auto-mode size` if you want maximum leak size instead of speed.
 - `--optimize` reuses connections per worker and rotates between sampling and dense scans.
+- Use the `hit=` token printed alongside a leak with `--hit` to replay the same probe.
+- Add `--hit-wiggle` to probe around the hit offset for more leaks.
 - The effective cap is the server’s `maxMessageSizeBytes`; values above it will be rejected before parsing.
 
 ## Improvements
