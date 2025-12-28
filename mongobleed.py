@@ -516,9 +516,10 @@ def main():
             f"workers={args.workers} decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}",
             style="bold white on blue",
         )
-        filler_lines = max(0, (rows + 6) - (rows + 2))
+        tip = Text("↑/↓ move 16 bytes  PgUp/PgDn page  q quit", style="bold yellow on blue")
+        filler_lines = max(0, (rows + 6) - (rows + 3))
         filler = Text(("\n" * filler_lines), style="white on blue")
-        return Group(status, table, filler)
+        return Group(status, tip, table, filler)
 
     def auto_window_for_size(size):
         return max(1024, min(65536, size // 2048))
