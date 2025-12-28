@@ -150,6 +150,9 @@ When you run with just `--loop --decode`, these defaults apply:
   1) Run `--auto-mode speed --loop --decode --optimize` to find hot offsets and capture a `hit=` token.
   2) Launch TUI with `--hit <token> --tui` to browse a live view around that offset.
 
+<img width="1262" height="802" alt="image" src="https://github.com/user-attachments/assets/14a78df4-8224-4a8e-a415-ce17cd4e56db" />
+
+
 ## Improvements
 
 Compared to the original release, this fork adds:
@@ -170,8 +173,7 @@ Compared to the original release, this fork adds:
 - Rich-formatted console logging
 - Additional tunables (`--buffer-extra`, `--timeout`, `--preview-bytes`)
 - KB/MB size parsing for offsets and buffer size
-
-<img width="1095" height="627" alt="image" src="https://github.com/user-attachments/assets/39b22457-ac8e-4cea-9a0d-560c6d1faa49" />
+/>
 
 
 ## Test Environment
