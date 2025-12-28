@@ -45,6 +45,9 @@ python3 mongobleed.py --host <target> --loop
 # Optimized scanning strategy (sampling + hot offsets)
 python3 mongobleed.py --host <target> --optimize --loop --decode
 
+# Interactive TUI hexdump viewer
+python3 mongobleed.py --host <target> --tui --loop
+
 # Deep scan for more data
 python3 mongobleed.py --host <target> --max-offset 50000
 
@@ -80,6 +83,9 @@ python3 mongobleed.py --host <target> --decode
 | `--auto-mode` | speed | Optimize for `speed` (bytes/sec) or `size` (max bytes) |
 | `--auto-timeout-max` | 300 | Max per-probe timeout in auto mode (seconds) |
 | `--optimize` | false | Smarter scan strategy with sampling, hot offsets, and backoff |
+| `--tui` | false | Interactive TUI hexdump browser |
+| `--tui-rows` | 16 | Rows to render in TUI |
+| `--tui-refresh` | 1.0 | TUI refresh interval in seconds |
 | `--hit` | none | Replay a specific hit token from output |
 | `--hit-wiggle` | 0 | Probe +/- N bytes around hit offset when replaying (default 32 if flag used) |
 | `--hit-backoff` | 0.2 | Seconds to sleep between hit replay loops |
@@ -133,6 +139,7 @@ When you run with just `--loop --decode`, these defaults apply:
 - Use the `hit=` token printed alongside a leak with `--hit` to replay the same probe.
 - Add `--hit-wiggle` to probe around the hit offset for more leaks.
 - Use `--hit-backoff` to slow down hit replay loops.
+- TUI controls: Up/Down to move by 16 bytes, PageUp/PageDown to jump by a full screen, `q` to quit.
 - The effective cap is the server’s `maxMessageSizeBytes`; values above it will be rejected before parsing.
 
 ## Improvements
