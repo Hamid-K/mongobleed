@@ -144,10 +144,19 @@ When you run with just `--loop --decode`, these defaults apply:
 
 ## TUI
 
-- Controls: Up/Down moves a row; PageUp/PageDown jumps a screen; `n` next hit, `p` previous hit; `v` toggles preview; `d` toggles decode; space pauses; `q` quits.
-- Auto-sizes rows and bytes-per-row to terminal width/height.
-- Preview pane shows the longest decoded fragment for the current refresh cycle (toggle with `v`, decode with `d`).
-- Next/Previous hit search (`n`/`p`) scans forward/backward for the next offset that yields a leak, then jumps the view.
+- **Controls**
+- `↑/↓` move one row
+- `PgUp/PgDn` jump one screen
+- `n` next hit
+- `p` previous hit
+- `v` toggle preview pane
+- `d` toggle decode in preview
+- `space` pause/resume refresh
+- `q` quit
+- **Behavior**
+- Auto-sizes rows and bytes-per-row to terminal width/height
+- Preview pane shows the longest decoded fragment from the current refresh cycle
+- Next/Previous hit search scans forward/backward until a leak is found, then jumps the view
 - Requires Textual: `pip install textual` (auto-resize supported).
 - Workflow:
   1) Run `--auto-mode speed --loop --decode --optimize` to find hot offsets and capture a `hit=` token.
