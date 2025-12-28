@@ -140,12 +140,15 @@ When you run with just `--loop --decode`, these defaults apply:
 - Use the `hit=` token printed alongside a leak with `--hit` to replay the same probe.
 - Add `--hit-wiggle` to probe around the hit offset for more leaks.
 - Use `--hit-backoff` to slow down hit replay loops.
-- TUI controls: Up/Down to move by 16 bytes, PageUp/PageDown to jump by a full screen, `q` to quit.
-- TUI uses Textual (install with `pip install textual`) and supports resize automatically.
-- Suggested TUI workflow:
-  1) Run `--auto --loop --decode` to find hot offsets and capture a `hit=` token.
-  2) Launch TUI with `--hit <token> --tui` to browse a live view around that offset.
 - The effective cap is the server’s `maxMessageSizeBytes`; values above it will be rejected before parsing.
+
+## TUI
+
+- Controls: Up/Down moves 16 bytes; PageUp/PageDown jumps a screen; `q` quits.
+- Requires Textual: `pip install textual` (auto-resize supported).
+- Workflow:
+  1) Run `--auto-mode speed --loop --decode --optimize` to find hot offsets and capture a `hit=` token.
+  2) Launch TUI with `--hit <token> --tui` to browse a live view around that offset.
 
 ## Improvements
 
@@ -164,7 +167,6 @@ Compared to the original release, this fork adds:
 - Connection reuse per worker in optimize mode
 - Hit replay tokens with `--hit` and wiggle/backoff support
 - Textual-powered TUI live memory browser (`--tui`) with MC-style layout and refresh
-- Suggested live-view workflow: run `--auto-mode speed --loop --decode --optimize` to find hot offsets, then use `--tui --hit <token>` to browse them
 - Rich-formatted console logging
 - Additional tunables (`--buffer-extra`, `--timeout`, `--preview-bytes`)
 - KB/MB size parsing for offsets and buffer size
