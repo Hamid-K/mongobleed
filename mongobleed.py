@@ -221,7 +221,7 @@ def main():
     parser.add_argument('--decode', action='store_true', help='Try to decode URL, unicode escapes, and base64')
     parser.add_argument('--hex', action='store_true', help='Force hexdump preview output')
     parser.add_argument('--hit', help='Replay a specific hit token from output')
-    parser.add_argument('--hit-wiggle', type=int, default=0,
+    parser.add_argument('--hit-wiggle', type=int, default=32,
                         help='Probe +/- N bytes around hit offset when replaying')
     parser.add_argument('--hit-backoff', type=float, default=0.2,
                         help='Seconds to sleep between hit replay loops')

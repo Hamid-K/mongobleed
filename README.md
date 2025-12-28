@@ -81,7 +81,7 @@ python3 mongobleed.py --host <target> --decode
 | `--auto-timeout-max` | 300 | Max per-probe timeout in auto mode (seconds) |
 | `--optimize` | false | Smarter scan strategy with sampling, hot offsets, and backoff |
 | `--hit` | none | Replay a specific hit token from output |
-| `--hit-wiggle` | 0 | Probe +/- N bytes around hit offset when replaying |
+| `--hit-wiggle` | 32 | Probe +/- N bytes around hit offset when replaying |
 | `--hit-backoff` | 0.2 | Seconds to sleep between hit replay loops |
 | `--output` | auto | Output file for leaked data |
 
