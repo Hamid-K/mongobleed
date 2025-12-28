@@ -158,10 +158,15 @@ Compared to the original release, this fork adds:
 - ASCII-safe previews to avoid mangled console output
 - Optional decoding of URL/unicode/base64 previews (`--decode`)
 - Escaped character cleanup for decoded previews (`\\uXXXX`, `\\xNN`, `\\n`, etc.)
+- Hexdump fallback for non-readable leaks and `--hex` override
 - Automatic dump size/window tuning (`--auto`)
 - Optimized scanning mode with sampling + hot offsets (`--optimize`)
+- Connection reuse per worker in optimize mode
+- Hit replay tokens with `--hit` and wiggle/backoff support
+- Textual-powered TUI hex browser (`--tui`)
 - Rich-formatted console logging
-- Additional tunables (`--buffer-bump`, `--timeout`, `--preview-bytes`)
+- Additional tunables (`--buffer-extra`, `--timeout`, `--preview-bytes`)
+- KB/MB size parsing for offsets and buffer size
 
 <img width="1095" height="627" alt="image" src="https://github.com/user-attachments/assets/39b22457-ac8e-4cea-9a0d-560c6d1faa49" />
 
