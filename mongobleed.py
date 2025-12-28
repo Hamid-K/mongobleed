@@ -493,16 +493,17 @@ def main():
     def _build_tui_table(base_offset, rows, row_bytes, row_changes, last_refresh, rate):
         table = Table(
             expand=True,
-            box=box.MINIMAL,
+            box=box.SQUARE,
             style="white on blue",
             header_style="bold yellow on blue",
+            title_style="bold yellow on blue",
             pad_edge=False,
-            padding=(0, 1),
+            padding=(0, 0),
             show_lines=False,
         )
         table.add_column("Offset", justify="right", no_wrap=True, style="bright_green on blue", width=10)
-        table.add_column("Hex", no_wrap=True, style="white on blue", width=47)
-        table.add_column("ASCII", no_wrap=True, style="white on blue", width=16)
+        table.add_column("Hex", no_wrap=True, style="white on blue")
+        table.add_column("ASCII", no_wrap=True, style="white on blue")
         now_ts = time.time()
         for idx in range(rows):
             offset = base_offset + idx * 16
@@ -515,7 +516,9 @@ def main():
             f"workers={args.workers} decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}",
             style="bold white on blue",
         )
-        return Group(status, table)
+        filler_lines = max(0, (rows + 6) - (rows + 2))
+        filler = Text(("\n" * filler_lines), style="white on blue")
+        return Group(status, table, filler)
 
     def auto_window_for_size(size):
         return max(1024, min(65536, size // 2048))
