@@ -432,6 +432,8 @@ def main():
     def _render_row_bytes(offset, data, last_change, now_ts):
         hex_text = Text()
         ascii_text = Text()
+        if len(last_change) < len(data):
+            last_change = last_change + [0.0] * (len(data) - len(last_change))
         for i, b in enumerate(data):
             age = now_ts - last_change[i]
             if age < 0.5:
@@ -716,6 +718,7 @@ def main():
                 self.row_bytes = {}
                 self.row_changes = {}
                 self.last_preview = ""
+                self._last_bytes_per_row = None
                 self.executor = concurrent.futures.ThreadPoolExecutor(
                     max_workers=max(1, min(args.workers, args.tui_rows))
                 )
@@ -749,7 +752,12 @@ def main():
                 self.rows = max(4, dump_h - 1)
                 # Offset(10) + spaces(2) + hex(3*n) + sep(3) + ascii(n) + end(1)
                 usable = max(8, dump_w - 16)
-                self.bytes_per_row = max(8, min(64, usable // 4))
+                new_bytes_per_row = max(8, min(64, usable // 4))
+                if self._last_bytes_per_row != new_bytes_per_row:
+                    self.row_bytes.clear()
+                    self.row_changes.clear()
+                    self._last_bytes_per_row = new_bytes_per_row
+                self.bytes_per_row = new_bytes_per_row
 
             async def refresh_view(self) -> None:
                 t0 = time.time()
@@ -792,7 +800,11 @@ def main():
                         chunk = data[idx:idx + self.bytes_per_row].ljust(self.bytes_per_row, b"\x00")
                         row_off = off + idx
                         prev = self.row_bytes.get(row_off, b"\x00" * self.bytes_per_row)
+                        if len(prev) != self.bytes_per_row:
+                            prev = b"\x00" * self.bytes_per_row
                         changes = self.row_changes.get(row_off, [0.0] * self.bytes_per_row)
+                        if len(changes) != self.bytes_per_row:
+                            changes = [0.0] * self.bytes_per_row
                         for i, b in enumerate(chunk):
                             if i >= len(prev) or b != prev[i]:
                                 changes[i] = now_ts
