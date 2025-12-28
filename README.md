@@ -141,6 +141,10 @@ When you run with just `--loop --decode`, these defaults apply:
 - Add `--hit-wiggle` to probe around the hit offset for more leaks.
 - Use `--hit-backoff` to slow down hit replay loops.
 - TUI controls: Up/Down to move by 16 bytes, PageUp/PageDown to jump by a full screen, `q` to quit.
+- TUI uses Textual (install with `pip install textual`) and supports resize automatically.
+- Suggested TUI workflow:
+  1) Run `--auto --loop --decode` to find hot offsets and capture a `hit=` token.
+  2) Launch TUI with `--hit <token> --tui` to browse a live view around that offset.
 - The effective cap is the server’s `maxMessageSizeBytes`; values above it will be rejected before parsing.
 
 ## Improvements
@@ -184,9 +188,11 @@ Leaked data may include:
 - [OX Security Advisory](https://www.ox.security/blog/attackers-could-exploit-zlib-to-exfiltrate-data-cve-2025-14847/)
 - [MongoDB Fix Commit](https://github.com/mongodb/mongo/commit/505b660a14698bd2b5233bd94da3917b585c5728)
 
-## Author
+## Credits
 
-Joe Desimone - [x.com/dez_](https://x.com/dez_)
+- Hamid Kashfi (@hkashfi)
+- Codex (OpenAI)
+- Joe Desimone - [x.com/dez_](https://x.com/dez_)
 
 ## Disclaimer
 

