@@ -152,6 +152,7 @@ When you run with just `--loop --decode`, these defaults apply:
 - `o` toggle search mode (linear vs optimized)
 - `v` toggle preview pane
 - `d` toggle decode in preview
+- `x/X` increase/decrease buffer extra in TUI
 - `space` pause/resume refresh
 - `q` quit
 - **Behavior**

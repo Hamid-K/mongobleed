@@ -33,6 +33,7 @@ import sys
 from collections import deque
 
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.text import Text
 from rich.layout import Layout
@@ -639,9 +640,9 @@ def main():
                                                 preview = cleaned
                                     if (args.decode and not is_mostly_printable(preview)) or args.hex:
                                         hexdump = hexdump_preview(data, args.preview_bytes)
-                                        console.print(f"[green][+][/green] hit offset={off} len={len(data):4d}:\n{hexdump}")
+                                        console.print(f"[green][+][/green] hit offset={off} len={len(data):4d}:\n{rich_escape(hexdump)}")
                                     else:
-                                        console.print(f"[green][+][/green] hit offset={off} len={len(data):4d}: {preview}")
+                                        console.print(f"[green][+][/green] hit offset={off} len={len(data):4d}: {rich_escape(preview)}")
                     if not any_leaks:
                         console.print("[bold yellow][!][/bold yellow] No leaks for hit token.")
                         if not args.loop:
@@ -685,7 +686,6 @@ def main():
             #preview {
                 background: #0000aa;
                 color: #ffffff;
-                height: 4;
                 border: solid #aaaaaa;
             }
             #footer {
@@ -712,6 +712,7 @@ def main():
             paused = reactive(False)
             decode_enabled = reactive(args.decode)
             search_optimize = reactive(False)
+            buffer_extra = reactive(args.buffer_extra)
 
             def __init__(self):
                 super().__init__()
@@ -724,11 +725,11 @@ def main():
                 )
 
             def compose(self) -> ComposeResult:
-                yield Static(id="status")
-                yield Static("↑/↓ move row  PgUp/PgDn page  n/p hit  o search  v view  d decode  space pause  q quit", id="tip")
+                yield Static(id="status", markup=False)
+                yield Static("↑/↓ move row  PgUp/PgDn page  n/p hit  o search  v view  d decode  x/X extra  space pause  q quit", id="tip", markup=False)
                 yield Static(id="dump")
-                yield Static(id="preview")
-                yield Static(id="footer")
+                yield Static(id="preview", markup=False)
+                yield Static(id="footer", markup=False)
 
             def on_mount(self) -> None:
                 if args.tui_auto_size:
@@ -740,6 +741,15 @@ def main():
                 if args.tui_auto_size:
                     self._apply_auto_rows()
                     self.refresh_view()
+
+            def _preview_height(self, text):
+                preview = self.query_one("#preview")
+                width = max(20, preview.size.width or 80)
+                lines = 0
+                for line in text.splitlines() or [""]:
+                    wrapped = max(1, (len(line) + width - 1) // width)
+                    lines += wrapped
+                return max(4, min(12, lines))
 
             def _apply_auto_rows(self) -> None:
                 try:
@@ -776,7 +786,7 @@ def main():
                         args.host,
                         args.port,
                         off,
-                        off + args.buffer_extra,
+                        off + self.buffer_extra,
                         args.timeout,
                     )
                     for off in offsets
@@ -826,18 +836,23 @@ def main():
                     self.last_preview = preview
                 status = (
                     f"base=0x{self.base:x} rows={self.rows} refresh={args.tui_refresh:.1f}s "
-                    f"rate={self.rate:.1f}/s workers={args.workers} "
+                    f"workers={args.workers} extra={self.buffer_extra} "
                     f"decode={'on' if self.decode_enabled else 'off'} optimize={'on' if args.optimize else 'off'} "
                     f"bytes/row={self.bytes_per_row} {self.search_state}"
                 )
                 self.query_one("#status", Static).update(status)
-                footer = "MC-TUI  |  q=quit  arrows=move  PgUp/PgDn=page  n/p=hit  o=search  v=view  d=decode  space=pause"
+                footer = "MC-TUI  |  q=quit  arrows=move  PgUp/PgDn=page  n/p=hit  o=search  v=view  d=decode  x/X=extra  space=pause"
                 self.query_one("#footer", Static).update(footer)
                 self.query_one("#dump", Static).update(self._render_dump())
                 if self.show_preview:
-                    self.query_one("#preview", Static).update(self.last_preview or "")
+                    preview_text = self.last_preview or ""
+                    preview_widget = self.query_one("#preview", Static)
+                    preview_widget.styles.height = self._preview_height(preview_text)
+                    preview_widget.update(preview_text)
                 else:
-                    self.query_one("#preview", Static).update("")
+                    preview_widget = self.query_one("#preview", Static)
+                    preview_widget.styles.height = 1
+                    preview_widget.update("")
 
             async def _search_hit(self, direction):
                 mode = "opt" if self.search_optimize else "lin"
@@ -860,12 +875,12 @@ def main():
                     response, ok = await loop.run_in_executor(
                         self.executor,
                         send_probe_reuse,
-                        args.host,
-                        args.port,
-                        off,
-                        off + args.buffer_extra,
-                        args.timeout,
-                    )
+                    args.host,
+                    args.port,
+                    off,
+                    off + self.buffer_extra,
+                    args.timeout,
+                )
                     if ok:
                         leaks = extract_leaks(response)
                         if leaks:
@@ -909,6 +924,10 @@ def main():
                     self.decode_enabled = not self.decode_enabled
                 elif event.key == "o":
                     self.search_optimize = not self.search_optimize
+                elif event.key == "x":
+                    self.buffer_extra = max(0, int(self.buffer_extra) + 1024)
+                elif event.key == "X":
+                    self.buffer_extra = max(0, int(self.buffer_extra) - 1024)
                 elif event.key == "n":
                     if not self.search_state:
                         asyncio.create_task(self._search_hit(1))
@@ -1311,10 +1330,10 @@ def main():
                                     if (args.decode and not is_mostly_printable(preview)) or args.hex:
                                         hexdump = hexdump_preview(data, args.preview_bytes)
                                         console.print(
-                                            f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}:\n{hexdump}"
+                                            f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}:\n{rich_escape(hexdump)}"
                                         )
                                     else:
-                                        console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
+                                        console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {rich_escape(preview)}")
                                 hit_token = encode_hit_token(doc_len)
                                 console.print(f"[bold orange3]HIT:[/bold orange3] [orange3]{hit_token}[/orange3]")
                 finally:
