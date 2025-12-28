@@ -163,6 +163,9 @@ Compared to the original release, this fork adds:
 - Rich-formatted console logging
 - Additional tunables (`--buffer-bump`, `--timeout`, `--preview-bytes`)
 
+<img width="1095" height="627" alt="image" src="https://github.com/user-attachments/assets/39b22457-ac8e-4cea-9a0d-560c6d1faa49" />
+
+
 ## Test Environment
 
 A Docker Compose file is included to spin up a vulnerable MongoDB instance:
