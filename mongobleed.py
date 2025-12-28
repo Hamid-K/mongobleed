@@ -21,6 +21,7 @@ import json
 import os
 import re
 import socket
+import signal
 import struct
 import threading
 import time
@@ -708,6 +709,7 @@ def main():
             search_state = reactive("")
             paused = reactive(False)
             decode_enabled = reactive(args.decode)
+            search_optimize = reactive(False)
 
             def __init__(self):
                 super().__init__()
@@ -720,7 +722,7 @@ def main():
 
             def compose(self) -> ComposeResult:
                 yield Static(id="status")
-                yield Static("↑/↓ move row  PgUp/PgDn page  n/p hit  v view  d decode  space pause  q quit", id="tip")
+                yield Static("↑/↓ move row  PgUp/PgDn page  n/p hit  o search  v view  d decode  space pause  q quit", id="tip")
                 yield Static(id="dump")
                 yield Static(id="preview")
                 yield Static(id="footer")
@@ -817,7 +819,7 @@ def main():
                     f"bytes/row={self.bytes_per_row} {self.search_state}"
                 )
                 self.query_one("#status", Static).update(status)
-                footer = "MC-TUI  |  q=quit  arrows=move  PgUp/PgDn=page  n/p=hit  v=view  d=decode  space=pause"
+                footer = "MC-TUI  |  q=quit  arrows=move  PgUp/PgDn=page  n/p=hit  o=search  v=view  d=decode  space=pause"
                 self.query_one("#footer", Static).update(footer)
                 self.query_one("#dump", Static).update(self._render_dump())
                 if self.show_preview:
@@ -826,12 +828,19 @@ def main():
                     self.query_one("#preview", Static).update("")
 
             async def _search_hit(self, direction):
-                self.search_state = f"search={'next' if direction > 0 else 'prev'}"
+                mode = "opt" if self.search_optimize else "lin"
+                self.search_state = f"search={'next' if direction > 0 else 'prev'}:{mode}"
                 start = self.base + direction * self.bytes_per_row
                 step = self.bytes_per_row
                 max_span = max(step * self.rows * 4, 4096)
                 end = start + direction * max_span
-                offsets = list(range(start, end, direction * step))
+                if self.search_optimize:
+                    span = max_span
+                    step2 = max(1, step * 4)
+                    offsets = list(range(start, end, direction * step2))
+                    offsets += list(range(start, end, direction * step))
+                else:
+                    offsets = list(range(start, end, direction * step))
                 loop = asyncio.get_running_loop()
                 for off in offsets:
                     if off < 0:
@@ -886,6 +895,8 @@ def main():
                     self.show_preview = not self.show_preview
                 elif event.key == "d":
                     self.decode_enabled = not self.decode_enabled
+                elif event.key == "o":
+                    self.search_optimize = not self.search_optimize
                 elif event.key == "n":
                     if not self.search_state:
                         asyncio.create_task(self._search_hit(1))
@@ -1188,8 +1199,25 @@ def main():
         return offsets
 
     interrupted = False
+    stop_event = threading.Event()
+    sigint_seen = {"value": False}
+
+    def _handle_sigint(signum, frame):
+        if not sigint_seen["value"]:
+            sigint_seen["value"] = True
+            stop_event.set()
+            console.print(
+                "[bold yellow][!][/bold yellow] Ctrl+C detected, attempting graceful shutdown..."
+            )
+        else:
+            console.print("[bold yellow][!][/bold yellow] Already stopping...")
+
+    signal.signal(signal.SIGINT, _handle_sigint)
     try:
         while True:
+            if stop_event.is_set():
+                interrupted = True
+                break
             pass_num += 1
             new_in_pass = 0
             if args.auto:
@@ -1221,11 +1249,15 @@ def main():
                 console=console,
             ) as progress:
                 task_id = progress.add_task("scan", total=total_offsets, last="-", rate="-")
-                with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-                    futures = [executor.submit(worker, doc_len) for doc_len in offsets]
-                    ok_count = 0
-                    timeout_count = 0
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=args.workers)
+                futures = [executor.submit(worker, doc_len) for doc_len in offsets]
+                ok_count = 0
+                timeout_count = 0
+                try:
                     for future in concurrent.futures.as_completed(futures):
+                        if stop_event.is_set():
+                            interrupted = True
+                            break
                         doc_len, leaks, ok = future.result()
                         progress.update(task_id, advance=1, last=str(doc_len))
                         if progress.tasks[0].elapsed:
@@ -1272,7 +1304,9 @@ def main():
                                     else:
                                         console.print(f"[green][+][/green] offset={doc_len:4d} len={len(data):4d}: {preview}")
                                 hit_token = encode_hit_token(doc_len)
-                                console.print(f"[dim]hit={hit_token}[/dim]")
+                                console.print(f"[bold orange3]HIT:[/bold orange3] [orange3]{hit_token}[/orange3]")
+                finally:
+                    executor.shutdown(wait=True, cancel_futures=True)
             if args.loop:
                 if auto_context is not None and not args.optimize:
                     if new_in_pass == 0:
@@ -1337,10 +1371,6 @@ def main():
                 break
     except KeyboardInterrupt:
         interrupted = True
-        console.print(
-            "[bold yellow][!][/bold yellow] "
-            "Ctrl+C detected, attempting graceful shutdown..."
-        )
         console.print("[bold yellow][!][/bold yellow] Interrupted by user, finalizing output...")
     finally:
         out_fh.close()

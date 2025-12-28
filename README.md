@@ -149,6 +149,7 @@ When you run with just `--loop --decode`, these defaults apply:
 - `PgUp/PgDn` jump one screen
 - `n` next hit
 - `p` previous hit
+- `o` toggle search mode (linear vs optimized)
 - `v` toggle preview pane
 - `d` toggle decode in preview
 - `space` pause/resume refresh
@@ -156,7 +157,7 @@ When you run with just `--loop --decode`, these defaults apply:
 - **Behavior**
 - Auto-sizes rows and bytes-per-row to terminal width/height
 - Preview pane shows the longest decoded fragment from the current refresh cycle
-- Next/Previous hit search scans forward/backward until a leak is found, then jumps the view
+- Next/Previous hit search scans forward/backward until a leak is found, then jumps the view (toggle mode with `o`)
 - Requires Textual: `pip install textual` (auto-resize supported).
 - Workflow:
   1) Run `--auto-mode speed --loop --decode --optimize` to find hot offsets and capture a `hit=` token.
