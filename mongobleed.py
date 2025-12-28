@@ -742,9 +742,14 @@ def main():
         stop_event = threading.Event()
         listener = threading.Thread(target=_key_listener, args=(key_q, stop_event), daemon=True)
         listener.start()
+        def _tui_panel(renderable):
+            return Panel(renderable, style="white on blue", padding=(0, 0), box=box.SQUARE, expand=True)
+
         try:
             with Live(auto_refresh=False, console=console, screen=True, transient=False) as live:
                 last_time = time.time()
+                renderable = _build_tui_table(base_offset, rows, row_bytes, row_changes, args.tui_refresh, 0.0)
+                live.update(_tui_panel(renderable), refresh=True)
                 while True:
                     now = time.time()
                     elapsed = now - last_time
@@ -799,10 +804,7 @@ def main():
 
                     rate = 1.0 / max(args.tui_refresh, 0.001)
                 renderable = _build_tui_table(base_offset, rows, row_bytes, row_changes, args.tui_refresh, rate)
-                live.update(
-                    Panel(renderable, style="white on blue", padding=(0, 1), box=box.SQUARE),
-                    refresh=True,
-                )
+                live.update(_tui_panel(renderable), refresh=True)
         except KeyboardInterrupt:
             stop_event.set()
             console.print("[bold yellow][!][/bold yellow] TUI interrupted.")
