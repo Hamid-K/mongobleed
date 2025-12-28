@@ -207,9 +207,9 @@ def main():
     )
     parser.add_argument('--host', default='localhost', help='Target host')
     parser.add_argument('--port', type=int, default=27017, help='Target port')
-    parser.add_argument('--min-offset', type=int, default=20, help='Min doc length')
-    parser.add_argument('--max-offset', type=int, default=1048576, help='Max doc length')
-    parser.add_argument('--buffer-extra', type=int, default=500, help='Extra bytes for claimed buffer size')
+    parser.add_argument('--min-offset', default='20', help='Min doc length (e.g., 20, 64KB)')
+    parser.add_argument('--max-offset', default='1048576', help='Max doc length (e.g., 1MB)')
+    parser.add_argument('--buffer-extra', default='500', help='Extra bytes for claimed buffer size (e.g., 10KB)')
     parser.add_argument('--timeout', type=float, default=2.0, help='Socket timeout in seconds')
     parser.add_argument('--workers', type=int, default=max(4, (os.cpu_count() or 4) * 10), help='Thread count')
     parser.add_argument('--preview-bytes', default='80', help='Bytes to show in console preview (e.g., 4096, 4KB)')
@@ -498,6 +498,19 @@ def main():
         return
 
     auto_context = None
+    try:
+        args.min_offset = parse_size(args.min_offset)
+        args.max_offset = parse_size(args.max_offset)
+    except ValueError as exc:
+        console.print(f"[bold red][!][/bold red] {exc}")
+        return
+
+    try:
+        args.buffer_extra = parse_size(args.buffer_extra)
+    except ValueError as exc:
+        console.print(f"[bold red][!][/bold red] {exc}")
+        return
+
     if args.auto:
         try:
             min_size = parse_size(args.auto_min)
@@ -743,10 +756,13 @@ def main():
     def build_optimize_offsets(pass_index, opt_ctx):
         offsets = []
         seen = set()
+        neighbor_steps = [-64, -32, -16, -8, -4, -2, -1, 1, 2, 4, 8, 16, 32, 64]
         for off in list(opt_ctx["hot_offsets"]):
-            if args.min_offset <= off < args.max_offset and off not in seen:
-                seen.add(off)
-                offsets.append(off)
+            for delta in [0] + neighbor_steps:
+                candidate = off + delta
+                if args.min_offset <= candidate < args.max_offset and candidate not in seen:
+                    seen.add(candidate)
+                    offsets.append(candidate)
 
         range_size = max(1, args.max_offset - args.min_offset)
         step = max(opt_ctx["sample_step"], max(1, range_size // opt_ctx["sample_budget"]))
@@ -781,6 +797,15 @@ def main():
         while True:
             pass_num += 1
             new_in_pass = 0
+            if args.auto:
+                mode_label = "auto"
+            elif args.dump:
+                mode_label = "dump"
+            elif args.optimize:
+                mode_label = "optimize"
+            else:
+                mode_label = "standard"
+            decode_label = "decode=on" if args.decode else "decode=off"
             if optimize_context is not None:
                 offsets = build_optimize_offsets(pass_num, optimize_context)
             else:
@@ -788,7 +813,10 @@ def main():
             total_offsets = len(offsets)
             with Progress(
                 SpinnerColumn(),
-                TextColumn(f"[bold cyan]Scanning offsets[/bold cyan] (workers={args.workers})"),
+                TextColumn(
+                    f"[bold cyan]Pass {pass_num}[/bold cyan] "
+                    f"[dim]mode={mode_label} {decode_label} workers={args.workers}[/dim]"
+                ),
                 BarColumn(),
                 TextColumn("{task.completed}/{task.total}"),
                 TextColumn("last={task.fields[last]:>7}"),

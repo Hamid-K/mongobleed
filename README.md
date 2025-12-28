@@ -61,9 +61,9 @@ python3 mongobleed.py --host <target> --decode
 |--------|---------|-------------|
 | `--host` | localhost | Target MongoDB host |
 | `--port` | 27017 | Target MongoDB port |
-| `--min-offset` | 20 | Minimum document length to probe |
-| `--max-offset` | 1048576 | Maximum document length to probe |
-| `--buffer-extra` | 500 | Extra bytes for claimed uncompressed size |
+| `--min-offset` | 20 | Minimum document length to probe (accepts KB/MB) |
+| `--max-offset` | 1048576 | Maximum document length to probe (accepts KB/MB) |
+| `--buffer-extra` | 500 | Extra bytes for claimed uncompressed size (accepts KB/MB) |
 | `--timeout` | 2.0 | Socket timeout in seconds |
 | `--workers` | `max(4, cpu*10)` | Thread count |
 | `--preview-bytes` | 80 | Bytes to show in console preview |
