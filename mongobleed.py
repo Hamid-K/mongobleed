@@ -492,16 +492,17 @@ def main():
 
     def _build_tui_table(base_offset, rows, row_bytes, row_changes, last_refresh, rate):
         table = Table(
-            title="MongoBleed TUI",
             expand=True,
-            box=box.SQUARE,
+            box=box.MINIMAL,
             style="white on blue",
             header_style="bold yellow on blue",
-            title_style="bold yellow on blue",
+            pad_edge=False,
+            padding=(0, 1),
+            show_lines=False,
         )
-        table.add_column("Offset", justify="right", no_wrap=True)
-        table.add_column("Hex")
-        table.add_column("ASCII")
+        table.add_column("Offset", justify="right", no_wrap=True, style="bright_green on blue", width=10)
+        table.add_column("Hex", no_wrap=True, style="white on blue", width=47)
+        table.add_column("ASCII", no_wrap=True, style="white on blue", width=16)
         now_ts = time.time()
         for idx in range(rows):
             offset = base_offset + idx * 16
@@ -514,7 +515,7 @@ def main():
             f"workers={args.workers} decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}",
             style="bold white on blue",
         )
-        return Group(table, status)
+        return Group(status, table)
 
     def auto_window_for_size(size):
         return max(1024, min(65536, size // 2048))
