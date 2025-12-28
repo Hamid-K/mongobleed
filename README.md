@@ -163,7 +163,8 @@ Compared to the original release, this fork adds:
 - Optimized scanning mode with sampling + hot offsets (`--optimize`)
 - Connection reuse per worker in optimize mode
 - Hit replay tokens with `--hit` and wiggle/backoff support
-- Textual-powered TUI hex browser (`--tui`)
+- Textual-powered TUI live memory browser (`--tui`) with MC-style layout and refresh
+- Suggested live-view workflow: run `--auto-mode speed --loop --decode --optimize` to find hot offsets, then use `--tui --hit <token>` to browse them
 - Rich-formatted console logging
 - Additional tunables (`--buffer-extra`, `--timeout`, `--preview-bytes`)
 - KB/MB size parsing for offsets and buffer size
