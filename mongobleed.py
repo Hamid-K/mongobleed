@@ -40,6 +40,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.console import Group
 from rich import box
+from rich.panel import Panel
 from urllib.parse import unquote_to_bytes
 
 FIELD_NAME_RE = re.compile(rb"field name '([^']*)'")
@@ -742,7 +743,7 @@ def main():
         listener = threading.Thread(target=_key_listener, args=(key_q, stop_event), daemon=True)
         listener.start()
         try:
-            with Live(auto_refresh=False, console=console, screen=True) as live:
+            with Live(auto_refresh=False, console=console, screen=True, transient=False) as live:
                 last_time = time.time()
                 while True:
                     now = time.time()
@@ -797,8 +798,11 @@ def main():
                             row_changes[off] = changes
 
                     rate = 1.0 / max(args.tui_refresh, 0.001)
-                    renderable = _build_tui_table(base_offset, rows, row_bytes, row_changes, args.tui_refresh, rate)
-                    live.update(renderable, refresh=True)
+                renderable = _build_tui_table(base_offset, rows, row_bytes, row_changes, args.tui_refresh, rate)
+                live.update(
+                    Panel(renderable, style="white on blue", padding=(0, 1), box=box.SQUARE),
+                    refresh=True,
+                )
         except KeyboardInterrupt:
             stop_event.set()
             console.print("[bold yellow][!][/bold yellow] TUI interrupted.")
