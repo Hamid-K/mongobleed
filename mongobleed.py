@@ -223,6 +223,8 @@ def main():
     parser.add_argument('--hit', help='Replay a specific hit token from output')
     parser.add_argument('--hit-wiggle', type=int, default=0,
                         help='Probe +/- N bytes around hit offset when replaying')
+    parser.add_argument('--hit-backoff', type=float, default=0.2,
+                        help='Seconds to sleep between hit replay loops')
     parser.add_argument('--dump', help='Target claimed size, e.g. 10MB or 512KB')
     parser.add_argument('--dump-window', type=int, default=0, help='Probe +/- N bytes around dump size (0=auto)')
     parser.add_argument('--auto', action='store_true', help='Auto-tune dump size/window for best yield')
@@ -612,6 +614,7 @@ def main():
                         return
                 if not args.loop:
                     return
+                time.sleep(args.hit_backoff)
         except KeyboardInterrupt:
             console.print("[bold yellow][!][/bold yellow] Ctrl+C detected, stopping hit replay.")
             return

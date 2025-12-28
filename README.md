@@ -82,6 +82,7 @@ python3 mongobleed.py --host <target> --decode
 | `--optimize` | false | Smarter scan strategy with sampling, hot offsets, and backoff |
 | `--hit` | none | Replay a specific hit token from output |
 | `--hit-wiggle` | 0 | Probe +/- N bytes around hit offset when replaying |
+| `--hit-backoff` | 0.2 | Seconds to sleep between hit replay loops |
 | `--output` | auto | Output file for leaked data |
 
 ## Defaults
@@ -131,6 +132,7 @@ When you run with just `--loop --decode`, these defaults apply:
 - `--optimize` reuses connections per worker and rotates between sampling and dense scans.
 - Use the `hit=` token printed alongside a leak with `--hit` to replay the same probe.
 - Add `--hit-wiggle` to probe around the hit offset for more leaks.
+- Use `--hit-backoff` to slow down hit replay loops.
 - The effective cap is the server’s `maxMessageSizeBytes`; values above it will be rejected before parsing.
 
 ## Improvements
