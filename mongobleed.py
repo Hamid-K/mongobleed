@@ -41,6 +41,7 @@ from rich.text import Text
 from rich.console import Group
 from rich import box
 from rich.panel import Panel
+from rich.layout import Layout
 from urllib.parse import unquote_to_bytes
 
 FIELD_NAME_RE = re.compile(rb"field name '([^']*)'")
@@ -491,7 +492,7 @@ def main():
             ascii_text.append(chr(b) if 32 <= b <= 126 else ".", style=style)
         return hex_text, ascii_text
 
-    def _build_tui_table(base_offset, rows, row_bytes, row_changes, last_refresh, rate):
+    def _build_tui_table(base_offset, rows, row_bytes, row_changes):
         table = Table(
             expand=True,
             box=box.SQUARE,
@@ -512,15 +513,7 @@ def main():
             changes = row_changes.get(offset, [0.0] * 16)
             hex_text, ascii_text = _render_row_bytes(offset, data, changes, now_ts)
             table.add_row(f"{offset:08x}", hex_text, ascii_text)
-        status = Text(
-            f"base=0x{base_offset:x} rows={rows} refresh={last_refresh:.1f}s rate={rate:.1f}/s "
-            f"workers={args.workers} decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}",
-            style="bold white on blue",
-        )
-        tip = Text("↑/↓ move 16 bytes  PgUp/PgDn page  q quit", style="bold yellow on blue")
-        filler_lines = max(0, (rows + 6) - (rows + 3))
-        filler = Text(("\n" * filler_lines), style="white on blue")
-        return Group(status, tip, table, filler)
+        return table
 
     def auto_window_for_size(size):
         return max(1024, min(65536, size // 2048))
@@ -748,8 +741,17 @@ def main():
         try:
             with Live(auto_refresh=False, console=console, screen=True, transient=False) as live:
                 last_time = time.time()
-                renderable = _build_tui_table(base_offset, rows, row_bytes, row_changes, args.tui_refresh, 0.0)
-                live.update(_tui_panel(renderable), refresh=True)
+                status = Text(
+                    f"base=0x{base_offset:x} rows={rows} refresh={args.tui_refresh:.1f}s rate=0.0/s "
+                    f"workers={args.workers} decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}",
+                    style="bold white on blue",
+                )
+                tip = Text("↑/↓ move 16 bytes  PgUp/PgDn page  q quit", style="bold yellow on blue")
+                header = Panel(Group(status, tip), style="white on blue", padding=(0, 1), box=box.SQUARE)
+                body = _tui_panel(_build_tui_table(base_offset, rows, row_bytes, row_changes))
+                layout = Layout()
+                layout.split_column(Layout(header, size=3), Layout(body))
+                live.update(layout, refresh=True)
                 while True:
                     now = time.time()
                     elapsed = now - last_time
@@ -803,8 +805,16 @@ def main():
                             row_changes[off] = changes
 
                     rate = 1.0 / max(args.tui_refresh, 0.001)
-                renderable = _build_tui_table(base_offset, rows, row_bytes, row_changes, args.tui_refresh, rate)
-                live.update(_tui_panel(renderable), refresh=True)
+                status = Text(
+                    f"base=0x{base_offset:x} rows={rows} refresh={args.tui_refresh:.1f}s rate={rate:.1f}/s "
+                    f"workers={args.workers} decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}",
+                    style="bold white on blue",
+                )
+                header = Panel(Group(status, tip), style="white on blue", padding=(0, 1), box=box.SQUARE)
+                body = _tui_panel(_build_tui_table(base_offset, rows, row_bytes, row_changes))
+                layout = Layout()
+                layout.split_column(Layout(header, size=3), Layout(body))
+                live.update(layout, refresh=True)
         except KeyboardInterrupt:
             stop_event.set()
             console.print("[bold yellow][!][/bold yellow] TUI interrupted.")
