@@ -30,6 +30,7 @@ import termios
 import tty
 import queue
 import atexit
+import shutil
 from collections import deque
 
 from rich.console import Console
@@ -38,6 +39,7 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 from rich.console import Group
+from rich import box
 from urllib.parse import unquote_to_bytes
 
 FIELD_NAME_RE = re.compile(rb"field name '([^']*)'")
@@ -251,6 +253,8 @@ def main():
                         help='Smarter scan strategy with sampling, hot offsets, and backoff')
     parser.add_argument('--tui', action='store_true', help='Interactive TUI hexdump browser')
     parser.add_argument('--tui-rows', type=int, default=16, help='Rows to render in TUI')
+    parser.add_argument('--tui-auto-size', action='store_true', default=True,
+                        help='Auto-size TUI rows based on terminal height')
     parser.add_argument('--tui-refresh', type=float, default=1.0, help='TUI refresh interval (seconds)')
     parser.add_argument('--output', default=None, help='Output file (default: auto-generated)')
     args = parser.parse_args()
@@ -475,19 +479,26 @@ def main():
         for i, b in enumerate(data):
             age = now_ts - last_change[i]
             if age < 0.5:
-                style = "bold green"
+                style = "bold yellow on blue"
             elif age < 1.5:
-                style = "yellow"
+                style = "bright_yellow on blue"
             elif age < 3.0:
-                style = "dim"
+                style = "white on blue"
             else:
-                style = None
+                style = "white on blue"
             hex_text.append(f"{b:02x} ", style=style)
             ascii_text.append(chr(b) if 32 <= b <= 126 else ".", style=style)
         return hex_text, ascii_text
 
     def _build_tui_table(base_offset, rows, row_bytes, row_changes, last_refresh, rate):
-        table = Table(title="MongoBleed TUI", expand=True)
+        table = Table(
+            title="MongoBleed TUI",
+            expand=True,
+            box=box.SQUARE,
+            style="white on blue",
+            header_style="bold yellow on blue",
+            title_style="bold yellow on blue",
+        )
         table.add_column("Offset", justify="right", no_wrap=True)
         table.add_column("Hex")
         table.add_column("ASCII")
@@ -501,7 +512,7 @@ def main():
         status = Text(
             f"base=0x{base_offset:x} rows={rows} refresh={last_refresh:.1f}s rate={rate:.1f}/s "
             f"workers={args.workers} decode={'on' if args.decode else 'off'} optimize={'on' if args.optimize else 'off'}",
-            style="dim",
+            style="bold white on blue",
         )
         return Group(table, status)
 
@@ -714,7 +725,11 @@ def main():
                 return
     if args.tui:
         base_offset = tui_base_offset if tui_base_offset is not None else args.min_offset
-        rows = max(1, args.tui_rows)
+        if args.tui_auto_size:
+            term = shutil.get_terminal_size(fallback=(80, 24))
+            rows = max(4, term.lines - 6)
+        else:
+            rows = max(1, args.tui_rows)
         row_bytes = {}
         row_changes = {}
         key_q = queue.Queue()

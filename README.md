@@ -85,6 +85,7 @@ python3 mongobleed.py --host <target> --decode
 | `--optimize` | false | Smarter scan strategy with sampling, hot offsets, and backoff |
 | `--tui` | false | Interactive TUI hexdump browser |
 | `--tui-rows` | 16 | Rows to render in TUI |
+| `--tui-auto-size` | true | Auto-size rows based on terminal height |
 | `--tui-refresh` | 1.0 | TUI refresh interval in seconds |
 | `--hit` | none | Replay a specific hit token from output |
 | `--hit-wiggle` | 0 | Probe +/- N bytes around hit offset when replaying (default 32 if flag used) |
